@@ -2168,6 +2168,9 @@ input_csi_dispatch_kitk_set(struct input_ctx *ictx)
 	s = ictx->ctx.s;
 	idx = s->kitty_kbd.idx;
 
+	log_debug("%s: flag_set=%d mode=%d current_flags=%u", __func__,
+		flag_set, mode, s->kitty_kbd.flags[idx]);
+
 	switch (mode) {
 	case 1:
 		/* set bits are set, unset bits are reset */
