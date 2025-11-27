@@ -1093,6 +1093,7 @@ set_modifier(key_code key ,u_int modifiers)
 		if (modifiers & 0x80)
 			key |= (KEYC_KEYPAD);
 	}
+
 	return key;
 }
 
@@ -1150,8 +1151,8 @@ tty_keys_kitty_key(struct tty *tty, const char *buf, size_t len,
 		return (-1);
 
 	/* Copy to the buffer. */
-	memcpy(tmp, buf + 2, end);
-	tmp[end-1] = '\0';
+	memcpy(tmp, buf + 2, end - 2);
+	tmp[end - 2] = '\0';
     final = buf[end];
 
 	/* Try to parse either form of key. */
@@ -1172,33 +1173,33 @@ tty_keys_kitty_key(struct tty *tty, const char *buf, size_t len,
                 j=0;
                 subcp=next;
                 while ((subnext = strsep(&subcp, ":")) != NULL) {
-                    switch (j){
+                    switch (j++){
                     case 0:           /* unicode-key-code */
                         number = strtoul(subnext, NULL, 10);
-                        continue;
+                        break;
                     case 1:           /* shift key code */
                         shiftnum = strtoul(subnext, NULL, 10);
-                        continue;
+                        break;
                     case 2:           /* base-layout-key */
                         basenum = strtoul(subnext, NULL, 10);
-                        continue;
+                        break;
                     }
-                    j++;
+                    /* j++ moved to switch */
                 }
 				continue;
             case 2:           /* modifier or modifier:eventtype */
                 j=0;
                 subcp=next;
                 while ((subnext = strsep(&subcp, ":")) != NULL) {
-                    switch (j){
+                    switch (j++){
                     case 0:           /* modifier */
                         modifiers = strtoul(subnext, NULL, 10);
-                        continue;
+                        break;
                     case 1:           /* eventtype code */
                         evtype = strtoul(subnext, NULL, 10);
-                        continue;
+                        break;
                     }
-                    j++;
+                    /* j++ moved to switch */
                 }
 				continue;
 			case 3:           /* Text as code points */
@@ -1795,11 +1796,12 @@ tty_keys_device_attributes(struct tty *tty, const char *buf, size_t len,
 	}
 	if (i == sizeof tmp)
 		return (-1);
-	if (buf[3 + i] != 'c')
+	if (buf[3 + i] != 'c' && buf[3 + i] != 'u')
 		return (-1);
 	tmp[i] = '\0';
 	*size = 4 + i;
 
+	final = buf[3 + i];
 
     switch (final){
         case 'u':
@@ -1849,12 +1851,12 @@ tty_keys_device_attributes(struct tty *tty, const char *buf, size_t len,
 				tty_add_features(features, "clipboard", ",");
 			}
 		}
+		tty_update_features(tty);
+		tty->flags |= TTY_HAVEDA;
 		break;
 	}
 	log_debug("%s: received primary DA %.*s", c->name, (int)*size, buf);
 
-	tty_update_features(tty);
-	tty->flags |= TTY_HAVEDA;
 
 	return (0);
 }
