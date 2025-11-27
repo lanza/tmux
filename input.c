@@ -2072,10 +2072,13 @@ input_csi_dispatch_sm_graphics(__unused struct input_ctx *ictx)
 static void
 input_csi_dispatch_kitk_query(struct input_ctx *ictx)
 {
-	enum kitty_kbd_flags flags =
-		ictx->ctx.s->kitty_kbd.flags[ictx->ctx.s->kitty_kbd.idx];
-	input_reply(ictx, 1,"\033[?%uu", flags);
-	log_debug("%s kitty kbd: query flags: %u ", __func__,flags);
+	/*
+	 * Respond with supported capabilities, not currently enabled flags.
+	 * This allows applications like fish to detect that kitty keyboard
+	 * protocol is available even when not yet enabled.
+	 */
+	input_reply(ictx, 1, "\033[?%uu", KITTY_KBD_SUPPORTED);
+	log_debug("%s kitty kbd: query supported flags: %u ", __func__, KITTY_KBD_SUPPORTED);
 }
 
 /* Handle CSI kitty keyboard protocol. :for push */
@@ -2098,6 +2101,30 @@ input_csi_dispatch_kitk_push(struct input_ctx *ictx)
 	ictx->ctx.s->kitty_kbd.idx = idx;
 
 	log_debug("%s kitty kbd: pushed new flags: 0x%03x", __func__,flags);
+
+	/* If kitty-keys is enabled globally, forward the enable to the terminal */
+	if (flags != 0 && options_get_number(global_options, "kitty-keys")) {
+		struct window_pane *wp = ictx->wp;
+		struct window *w;
+		struct client *c;
+
+		if (wp == NULL)
+			return;
+		w = wp->window;
+		if (w == NULL)
+			return;
+
+		/* Find a client attached to this window */
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->session != NULL && c->session->curw->window == w && c->tty.term != NULL) {
+				char seq[16];
+				xsnprintf(seq, sizeof seq, "\033[>%du", flags);
+				tty_puts(&c->tty, seq);
+				tty_puts(&c->tty, "\033[?u"); /* query to update kitty_state */
+				break;
+			}
+		}
+	}
 
 }
 
