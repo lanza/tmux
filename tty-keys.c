@@ -1810,13 +1810,13 @@ tty_keys_device_attributes(struct tty *tty, const char *buf, size_t len,
 			  break;
           }
           tty_add_features(features, "kitkeys", ",");
+          tty_update_features(tty);
+          tty->flags |= TTY_HAVEDA_KITTY;
           /* kitty keys: push 1 entries */
 		  if (options_get_number(global_options, "kitty-keys")){
 			  tty_puts(tty, tty_term_string(tty->term, TTYC_ENKITK));
 			  tty_puts(tty, "\033[?u"); /* query flag again to update tty->kitty_state.*/
 		  }
-          tty_update_features(tty);
-          tty->flags |= TTY_HAVEDA_KITTY;
           break;
         case 'c':
           if (tty->flags & TTY_HAVEDA ){

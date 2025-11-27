@@ -484,6 +484,9 @@ input_key_kitty(struct screen *s, struct bufferevent *bev,key_code key)
 	onlykey = (key & KEYC_MASK_KEY);
 	modifier = get_modifier(key);
 
+	log_debug("%s: key=0x%llx onlykey=0x%llx modifier=%u flags=%u disambiguate=%d",
+		__func__, key, onlykey, modifier, flags, disambiguate);
+
     if (!disambiguate) return (-1);
 
 	/* Ignore internal function key codes. */
@@ -493,18 +496,22 @@ input_key_kitty(struct screen *s, struct bufferevent *bev,key_code key)
 	}
 
 	/*
-	 * If this is a normal 7-bit key, just send it,
-	 * If it is a UTF-8 key, split it and send it.
+	 * If this is a normal 7-bit key with no modifiers, just send it.
+	 * If it is a UTF-8 key with no modifiers, send it.
+	 * Keys with modifiers need to go through kitty encoding below.
 	 */
-	if (key <= 0x7f) {
-		ud.data[0] = key;
-		input_key_write(__func__, bev, &ud.data[0], 1);
-		return (0);
-	}
-	if (KEYC_IS_UNICODE(key)) {
-		utf8_to_data(key, &ud);
-		input_key_write(__func__, bev, ud.data, ud.size);
-		return (0);
+	if (modifier == 1) {
+		/* No modifiers present */
+		if (onlykey <= 0x7f) {
+			ud.data[0] = onlykey;
+			input_key_write(__func__, bev, &ud.data[0], 1);
+			return (0);
+		}
+		if (KEYC_IS_UNICODE(onlykey)) {
+			utf8_to_data(onlykey, &ud);
+			input_key_write(__func__, bev, ud.data, ud.size);
+			return (0);
+		}
 	}
 	if(all_as_escapes)
         goto emit_escapes;
@@ -832,8 +839,14 @@ input_key(struct screen *s, struct bufferevent *bev, key_code key)
 	if (KEYC_IS_MOUSE(key))
 		return (0);
     kitty_flags = s->kitty_kbd.flags[s->kitty_kbd.idx];
+
+	log_debug("%s: key=0x%llx (%s) kitty_flags=%u idx=%u", __func__, key,
+		key_string_lookup_key(key, 1), kitty_flags, s->kitty_kbd.idx);
+
 	if (kitty_flags){
-		if(input_key_kitty(s,bev,key) == 0)
+		int result = input_key_kitty(s,bev,key);
+		log_debug("%s: input_key_kitty returned %d", __func__, result);
+		if(result == 0)
 			return (0);
 	}
 	/* legacy encoding key events */
