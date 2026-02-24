@@ -232,10 +232,11 @@ cmd_display_panes_key(struct client *c, void *data, struct key_event *event)
 	u_int				 index;
 	key_code			 key;
 
-	if (event->key >= '0' && event->key <= '9')
-		index = event->key - '0';
-	else if ((event->key & KEYC_MASK_MODIFIERS) == 0) {
-		key = (event->key & KEYC_MASK_KEY);
+	key = event->key & ~KEYC_CAPS_LOCK;
+	if (key >= '0' && key <= '9')
+		index = key - '0';
+	else if ((key & KEYC_MASK_MODIFIERS) == 0) {
+		key = (key & KEYC_MASK_KEY);
 		if (key >= 'a' && key <= 'z')
 			index = 10 + (key - 'a');
 		else
