@@ -2118,7 +2118,7 @@ input_csi_dispatch_kitk_push(struct input_ctx *ictx)
 		if (w == NULL)
 			return;
 
-		/* Find a client attached to this window */
+		/* Forward kitty flags enable to all clients attached to this window */
 		TAILQ_FOREACH(c, &clients, entry) {
 			if (c->session != NULL &&
 			    c->session->curw->window == w &&
@@ -2127,7 +2127,6 @@ input_csi_dispatch_kitk_push(struct input_ctx *ictx)
 				xsnprintf(seq, sizeof seq, "\033[>%du", flags);
 				tty_puts(&c->tty, seq);
 				tty_puts(&c->tty, "\033[?u");
-				break;
 			}
 		}
 	}
@@ -2174,7 +2173,6 @@ input_csi_dispatch_kitk_pop(struct input_ctx *ictx)
 			    c->session->curw->window == w &&
 			    c->tty.term != NULL) {
 				tty_puts(&c->tty, "\033[<u");
-				break;
 			}
 		}
 	}
@@ -2237,7 +2235,6 @@ input_csi_dispatch_kitk_set(struct input_ctx *ictx)
 				xsnprintf(seq, sizeof seq, "\033[=%d;1u",
 				    new_flags);
 				tty_puts(&c->tty, seq);
-				break;
 			}
 		}
 	}
