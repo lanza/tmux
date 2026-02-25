@@ -2141,15 +2141,17 @@ input_csi_dispatch_kitk_pop(struct input_ctx *ictx)
 {
 	/* CSI < number u # to pop number entries, defaulting to 1 if unspecified */
 	uint8_t idx;
-	int i, count;
+	int i, count, popped;
 	count = input_get(ictx, 0, 1, 1);
 	if (count > (int)nitems(ictx->ctx.s->kitty_kbd.flags))
 		count = nitems(ictx->ctx.s->kitty_kbd.flags);
 	log_debug("%s kitty kbd: popping %d levels of flags", __func__, count);
 
 	idx = ictx->ctx.s->kitty_kbd.idx;
+	popped = 0;
 	for (i = 0; i < count; i++) {
 		ictx->ctx.s->kitty_kbd.flags[idx] = 0;
+		popped++;
 		if (idx == 0)
 			break; /* don't wrap below base */
 		idx--;
@@ -2167,7 +2169,7 @@ input_csi_dispatch_kitk_pop(struct input_ctx *ictx)
 	log_debug("kitty kbd: flags after pop: 0x%03x",
 	    ictx->ctx.s->kitty_kbd.flags[idx]);
 
-	/* Forward pop to outer terminal */
+	/* Forward pop to outer terminal — one pop per level actually popped. */
 	if (options_get_number(global_options, "kitty-keys")) {
 		struct window_pane *wp = ictx->wp;
 		struct window *w;
@@ -2183,7 +2185,8 @@ input_csi_dispatch_kitk_pop(struct input_ctx *ictx)
 			if (c->session != NULL &&
 			    c->session->curw->window == w &&
 			    c->tty.term != NULL) {
-				tty_puts(&c->tty, "\033[<u");
+				for (i = 0; i < popped; i++)
+					tty_puts(&c->tty, "\033[<u");
 			}
 		}
 	}
