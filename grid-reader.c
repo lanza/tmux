@@ -50,6 +50,8 @@ grid_reader_cursor_right(struct grid_reader *gr, int wrap, int all)
 	u_int			px;
 	struct grid_cell	gc;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return;
 	if (all)
 		px = gr->gd->sx;
 	else
@@ -96,6 +98,8 @@ grid_reader_cursor_down(struct grid_reader *gr)
 {
 	struct grid_cell	gc;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return;
 	if (gr->cy < gr->gd->hsize + gr->gd->sy - 1)
 		gr->cy++;
 	while (gr->cx > 0) {
@@ -141,6 +145,8 @@ grid_reader_cursor_end_of_line(struct grid_reader *gr, int wrap, int all)
 {
 	u_int	yy;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return;
 	if (wrap) {
 		yy = gr->gd->hsize + gr->gd->sy - 1;
 		while (gr->cy < yy && grid_get_line(gr->gd, gr->cy)->flags &
@@ -169,7 +175,7 @@ grid_reader_handle_wrap(struct grid_reader *gr, u_int *xx, u_int *yy)
 		grid_reader_cursor_down(gr);
 
 		if (grid_get_line(gr->gd, gr->cy)->flags & GRID_LINE_WRAPPED)
-			*xx = gr->gd->sx - 1;
+			*xx = gr->gd->sx > 0 ? gr->gd->sx - 1 : 0;
 		else
 			*xx = grid_reader_line_length(gr);
 	}
@@ -189,9 +195,11 @@ grid_reader_cursor_next_word(struct grid_reader *gr, const char *separators)
 {
 	u_int	xx, yy, width;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return;
 	/* Do not break up wrapped words. */
 	if (grid_get_line(gr->gd, gr->cy)->flags & GRID_LINE_WRAPPED)
-		xx = gr->gd->sx - 1;
+		xx = gr->gd->sx > 0 ? gr->gd->sx - 1 : 0;
 	else
 		xx = grid_reader_line_length(gr);
 	yy = gr->gd->hsize + gr->gd->sy - 1;
@@ -226,6 +234,8 @@ grid_reader_cursor_next_word(struct grid_reader *gr, const char *separators)
 	while (grid_reader_handle_wrap(gr, &xx, &yy) &&
 	    (width = grid_reader_in_set(gr, WHITESPACE)))
 		gr->cx += width;
+	if (gr->cx > gr->gd->sx)
+		gr->cx = gr->gd->sx;
 }
 
 /* Move cursor to the end of the next word. */
@@ -234,9 +244,11 @@ grid_reader_cursor_next_word_end(struct grid_reader *gr, const char *separators)
 {
 	u_int	xx, yy;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return;
 	/* Do not break up wrapped words. */
 	if (grid_get_line(gr->gd, gr->cy)->flags & GRID_LINE_WRAPPED)
-		xx = gr->gd->sx - 1;
+		xx = gr->gd->sx > 0 ? gr->gd->sx - 1 : 0;
 	else
 		xx = grid_reader_line_length(gr);
 	yy = gr->gd->hsize + gr->gd->sy - 1;
@@ -278,7 +290,8 @@ void
 grid_reader_cursor_previous_word(struct grid_reader *gr, const char *separators,
     int already, int stop_at_eol)
 {
-	int	oldx, oldy, at_eol, word_is_letters;
+	u_int	oldx, oldy;
+	int	at_eol, word_is_letters = 0;
 
 	/* Move back to the previous word character. */
 	if (already || grid_reader_in_set(gr, WHITESPACE)) {
@@ -354,6 +367,8 @@ grid_reader_cursor_jump(struct grid_reader *gr, const struct utf8_data *jc)
 	struct grid_cell	gc;
 	u_int			px, py, xx, yy;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return (0);
 	px = gr->cx;
 	yy = gr->gd->hsize + gr->gd->sy - 1;
 
@@ -411,6 +426,8 @@ grid_reader_cursor_back_to_indentation(struct grid_reader *gr)
 	struct grid_cell	gc;
 	u_int			px, py, xx, yy, oldx, oldy;
 
+	if (gr->gd->hsize + gr->gd->sy == 0)
+		return;
 	yy = gr->gd->hsize + gr->gd->sy - 1;
 	oldx = gr->cx;
 	oldy = gr->cy;

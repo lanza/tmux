@@ -275,7 +275,7 @@ if_else		: ELSE
 			struct cmd_parse_scope	*scope;
 
 			scope = xmalloc(sizeof *scope);
-			scope->flag = !ps->scope->flag;
+			scope->flag = (ps->scope != NULL) ? !ps->scope->flag : 0;
 
 			free(ps->scope);
 			ps->scope = scope;
@@ -413,8 +413,7 @@ commands	: command
 				$$ = $1;
 				TAILQ_INSERT_TAIL($$, $3, entry);
 			} else {
-				$$ = cmd_parse_new_commands();
-				cmd_parse_free_commands($1);
+				$$ = $1;
 				cmd_parse_free_command($3);
 			}
 		}
@@ -686,11 +685,14 @@ cmd_parse_run_parser(char **cause)
 		TAILQ_REMOVE(&ps->stack, scope, entry);
 		free(scope);
 	}
+	free(ps->scope);
+	ps->scope = NULL;
 	if (retval != 0) {
 		*cause = ps->error;
 		return (NULL);
 	}
 
+	free(ps->error);
 	if (ps->commands == NULL)
 		return (cmd_parse_new_commands());
 	return (ps->commands);
@@ -790,6 +792,7 @@ cmd_parse_expand_alias(struct cmd_parse_command *cmd,
 
 	last = TAILQ_LAST(cmds, cmd_parse_commands);
 	if (last == NULL) {
+		cmd_parse_free_commands(cmds);
 		pr->status = CMD_PARSE_SUCCESS;
 		pr->cmdlist = cmd_list_new();
 		return (1);
@@ -803,6 +806,7 @@ cmd_parse_expand_alias(struct cmd_parse_command *cmd,
 
 	pi->flags |= CMD_PARSE_NOALIAS;
 	cmd_parse_build_commands(cmds, pi, pr);
+	cmd_parse_free_commands(cmds);
 	pi->flags &= ~CMD_PARSE_NOALIAS;
 	return (1);
 }
@@ -1604,7 +1608,7 @@ yylex_token_tilde(char **buf, size_t *len)
 
 	if (*name == '\0') {
 		envent = environ_find(global_environ, "HOME");
-		if (envent != NULL && *envent->value != '\0')
+		if (envent != NULL && envent->value != NULL && *envent->value != '\0')
 			home = envent->value;
 		else if ((pw = getpwuid(getuid())) != NULL)
 			home = pw->pw_dir;

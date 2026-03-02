@@ -83,6 +83,8 @@ proc_event_cb(__unused int fd, short events, void *arg)
 			return;
 		}
 		for (;;) {
+			if (peer->flags & PEER_BAD)
+				break;
 			if ((n = imsg_get(&peer->ibuf, &imsg)) == -1) {
 				peer->dispatchcb(NULL, peer->arg);
 				return;
@@ -187,8 +189,10 @@ proc_start(const char *name)
 	if (uname(&u) < 0)
 		memset(&u, 0, sizeof u);
 
-	log_debug("%s started (%ld): version %s, socket %s, protocol %d", name,
-	    (long)getpid(), getversion(), socket_path, PROTOCOL_VERSION);
+	log_debug("%s started (%ld): version %s, socket %s, protocol %d",
+	    name, (long)getpid(), getversion(), socket_path,
+	    PROTOCOL_VERSION);
+	log_debug("git hash %s", TMUX_GIT_HASH);
 	log_debug("on %s %s %s", u.sysname, u.release, u.version);
 	log_debug("using libevent %s %s", event_get_version(), event_get_method());
 #ifdef HAVE_UTF8PROC
@@ -293,6 +297,8 @@ proc_clear_signals(struct tmuxproc *tp, int defaults)
 		sigaction(SIGUSR1, &sa, NULL);
 		sigaction(SIGUSR2, &sa, NULL);
 		sigaction(SIGWINCH, &sa, NULL);
+		sigaction(SIGTTIN, &sa, NULL);
+		sigaction(SIGTTOU, &sa, NULL);
 	}
 }
 

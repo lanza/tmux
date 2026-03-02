@@ -137,6 +137,9 @@ screen_reinit(struct screen *s)
 	memset(s->saved_kitty_kbd.flags, 0, sizeof(s->saved_kitty_kbd.flags));
 	s->kitty_kbd.idx = 0;
 	s->saved_kitty_kbd.idx = 0;
+
+	if (options_get_number(global_options, "kitty-keys") == 2)
+		s->kitty_kbd.flags[0] = KITTY_KBD_DISAMBIGUATE;
 }
 
 /* Reset hyperlinks of a screen. */
@@ -307,8 +310,9 @@ screen_resize_cursor(struct screen *s, u_int sx, u_int sy, int reflow,
     int eat_empty, int cursor)
 {
 	u_int	cx = s->cx, cy = s->grid->hsize + s->cy;
+	int	had_write_list = (s->write_list != NULL);
 
-	if (s->write_list != NULL)
+	if (had_write_list)
 		screen_write_free_list(s);
 
 	log_debug("%s: new size %ux%u, now %ux%u (cursor %u,%u = %u,%u)",
@@ -347,7 +351,7 @@ screen_resize_cursor(struct screen *s, u_int sx, u_int sy, int reflow,
 	log_debug("%s: cursor finished at %u,%u = %u,%u", __func__, s->cx,
 	    s->cy, cx, cy);
 
-	if (s->write_list != NULL)
+	if (had_write_list)
 		screen_write_make_list(s);
 }
 
@@ -775,6 +779,12 @@ screen_mode_to_string(int mode)
 		strlcat(tmp, "KEYS_EXTENDED_2,", sizeof tmp);
 	if (mode & MODE_THEME_UPDATES)
 		strlcat(tmp, "THEME_UPDATES,", sizeof tmp);
+	if (mode & MODE_CURSOR_BLINKING_SET)
+		strlcat(tmp, "CURSOR_BLINKING_SET,", sizeof tmp);
+	if (mode & MODE_SYNC)
+		strlcat(tmp, "SYNC,", sizeof tmp);
+	if (*tmp == '\0')
+		return ("UNKNOWN");
 	tmp[strlen(tmp) - 1] = '\0';
 	return (tmp);
 }

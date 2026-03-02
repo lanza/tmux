@@ -78,8 +78,8 @@ static void	tty_write_one(void (*)(struct tty *, const struct tty_ctx *),
 	((ctx)->xoff == 0 && (ctx)->sx >= (tty)->sx)
 
 #define TTY_BLOCK_INTERVAL (100000 /* 100 milliseconds */)
-#define TTY_BLOCK_START(tty) (1 + ((tty)->sx * (tty)->sy) * 8)
-#define TTY_BLOCK_STOP(tty) (1 + ((tty)->sx * (tty)->sy) / 8)
+#define TTY_BLOCK_START(tty) (1 + ((size_t)(tty)->sx * (tty)->sy) * 8)
+#define TTY_BLOCK_STOP(tty) (1 + ((size_t)(tty)->sx * (tty)->sy) / 8)
 
 #define TTY_QUERY_TIMEOUT 5
 #define TTY_REQUEST_LIMIT 30
@@ -157,6 +157,10 @@ tty_resize(struct tty *tty)
 void
 tty_set_size(struct tty *tty, u_int sx, u_int sy, u_int xpixel, u_int ypixel)
 {
+	if (sx == 0)
+		sx = 80;
+	if (sy == 0)
+		sy = 24;
 	tty->sx = sx;
 	tty->sy = sy;
 	tty->xpixel = xpixel;
@@ -382,6 +386,20 @@ tty_start_tty(struct tty *tty)
 	tty->mouse_drag_flag = 0;
 	tty->mouse_drag_update = NULL;
 	tty->mouse_drag_release = NULL;
+
+	/*
+	 * If kitty-keys is "always", push kitty keyboard mode unconditionally
+	 * without waiting for a DA response. This forces kitty mode on
+	 * terminals that may not advertise support. Set TTY_HAVEDA_KITTY to
+	 * prevent the DA handler from pushing a second time on reconnect.
+	 */
+	if (options_get_number(global_options, "kitty-keys") == 2) {
+		if (tty_term_has(tty->term, TTYC_ENKITK)) {
+			tty_putcode(tty, TTYC_ENKITK);
+			tty_puts(tty, "\033[?u");
+			tty->flags |= TTY_HAVEDA_KITTY;
+		}
+	}
 }
 
 void
@@ -411,18 +429,23 @@ tty_repeat_requests(struct tty *tty, int force)
 {
 	struct client	*c = tty->client;
 	time_t		 t = time(NULL);
-	u_int		 n = t - tty->last_requests;
+	time_t		 n;
 
 	if (~tty->flags & TTY_STARTED)
 		return;
 
+	if (t < tty->last_requests)
+		n = 0;
+	else
+		n = t - tty->last_requests;
+
 	if (!force && n <= TTY_REQUEST_LIMIT) {
-		log_debug("%s: not repeating requests (%u seconds)", c->name,
-		    n);
+		log_debug("%s: not repeating requests (%lld seconds)", c->name,
+		    (long long)n);
 		return;
 	}
-	log_debug("%s: %srepeating requests (%u seconds)", c->name,
-	    force ? "(force) " : "" , n);
+	log_debug("%s: %srepeating requests (%lld seconds)", c->name,
+	    force ? "(force) " : "" , (long long)n);
 	tty->last_requests = t;
 
 	if (tty->term->flags & TERM_VT100LIKE) {
@@ -440,7 +463,8 @@ tty_stop_tty(struct tty *tty)
 
 	if (!(tty->flags & TTY_STARTED))
 		return;
-	tty->flags &= ~TTY_STARTED;
+	tty->flags &= ~(TTY_STARTED|TTY_ALL_REQUEST_FLAGS);
+	tty->kitty_state = 0;
 
 	evtimer_del(&tty->start_timer);
 	evtimer_del(&tty->clipboard_timer);
@@ -461,7 +485,8 @@ tty_stop_tty(struct tty *tty)
 	if (tcsetattr(c->fd, TCSANOW, &tty->tio) == -1)
 		return;
 
-	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, ws.ws_row - 1));
+	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0,
+	    ws.ws_row > 0 ? ws.ws_row - 1 : 0));
 	if (tty_acs_needed(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_RMACS));
 	tty_raw(tty, tty_term_string(tty->term, TTYC_SGR0));
@@ -693,6 +718,7 @@ tty_putn(struct tty *tty, const void *buf, size_t len, u_int width)
 {
 	if ((tty->term->flags & TERM_NOAM) &&
 	    tty->cy == tty->sy - 1 &&
+	    tty->cx < tty->sx &&
 	    tty->cx + len >= tty->sx)
 		len = tty->sx - tty->cx - 1;
 
@@ -934,9 +960,18 @@ int
 tty_window_bigger(struct tty *tty)
 {
 	struct client	*c = tty->client;
-	struct window	*w = c->session->curw->window;
+	struct window	*w;
 
-	return (tty->sx < w->sx || tty->sy - status_line_size(c) < w->sy);
+	u_int		 lines;
+
+	if (c->session == NULL || c->session->curw == NULL)
+		return (0);
+	w = c->session->curw->window;
+
+	lines = status_line_size(c);
+	if (lines > tty->sy)
+		lines = tty->sy;
+	return (tty->sx < w->sx || tty->sy - lines < w->sy);
 }
 
 /* What offset should this window be drawn at? */
@@ -956,11 +991,29 @@ static int
 tty_window_offset1(struct tty *tty, u_int *ox, u_int *oy, u_int *sx, u_int *sy)
 {
 	struct client		*c = tty->client;
-	struct window		*w = c->session->curw->window;
+	struct window		*w;
 	struct window_pane	*wp = server_client_get_pane(c);
 	u_int			 cx, cy, lines;
 
+	if (wp == NULL) {
+		*ox = 0;
+		*oy = 0;
+		*sx = tty->sx;
+		*sy = tty->sy;
+		return (0);
+	}
+	if (c->session == NULL || c->session->curw == NULL) {
+		*ox = 0;
+		*oy = 0;
+		*sx = tty->sx;
+		*sy = tty->sy;
+		return (0);
+	}
+	w = c->session->curw->window;
+
 	lines = status_line_size(c);
+	if (lines > tty->sy)
+		lines = tty->sy;
 
 	if (tty->sx >= w->sx && tty->sy - lines >= w->sy) {
 		*ox = 0;
@@ -1065,6 +1118,8 @@ tty_update_client_offset(struct client *c)
 static int
 tty_large_region(__unused struct tty *tty, const struct tty_ctx *ctx)
 {
+	if (ctx->orlower < ctx->orupper)
+		return (0);
 	return (ctx->orlower - ctx->orupper >= ctx->sy / 2);
 }
 
@@ -1132,6 +1187,8 @@ tty_clamp_line(struct tty *tty, const struct tty_ctx *ctx, u_int px, u_int py,
 
 	if (!tty_is_visible(tty, ctx, px, py, nx, 1))
 		return (0);
+	if (ctx->yoff + py < ctx->woy)
+		return (0);
 	*ry = ctx->yoff + py - ctx->woy;
 
 	if (xoff >= ctx->wox && xoff + nx <= ctx->wox + ctx->wsx) {
@@ -1141,7 +1198,7 @@ tty_clamp_line(struct tty *tty, const struct tty_ctx *ctx, u_int px, u_int py,
 		*rx = nx;
 	} else if (xoff < ctx->wox && xoff + nx > ctx->wox + ctx->wsx) {
 		/* Both left and right not visible. */
-		*i = ctx->wox;
+		*i = ctx->wox - (ctx->xoff + px);
 		*x = 0;
 		*rx = ctx->wsx;
 	} else if (xoff < ctx->wox) {
@@ -1238,7 +1295,7 @@ tty_clamp_area(struct tty *tty, const struct tty_ctx *ctx, u_int px, u_int py,
 		*rx = nx;
 	} else if (xoff < ctx->wox && xoff + nx > ctx->wox + ctx->wsx) {
 		/* Both left and right not visible. */
-		*i = ctx->wox;
+		*i = ctx->wox - (ctx->xoff + px);
 		*x = 0;
 		*rx = ctx->wsx;
 	} else if (xoff < ctx->wox) {
@@ -1262,7 +1319,7 @@ tty_clamp_area(struct tty *tty, const struct tty_ctx *ctx, u_int px, u_int py,
 		*ry = ny;
 	} else if (yoff < ctx->woy && yoff + ny > ctx->woy + ctx->wsy) {
 		/* Both top and bottom not visible. */
-		*j = ctx->woy;
+		*j = ctx->woy - (ctx->yoff + py);
 		*y = 0;
 		*ry = ctx->wsy;
 	} else if (yoff < ctx->woy) {
@@ -1454,7 +1511,8 @@ tty_set_client_cb(struct tty_ctx *ttyctx, struct client *c)
 {
 	struct window_pane	*wp = ttyctx->arg;
 
-	if (c->session->curw->window != wp->window)
+	if (c->session == NULL || c->session->curw == NULL ||
+	    c->session->curw->window != wp->window)
 		return (0);
 	if (wp->layout_cell == NULL)
 		return (0);
@@ -1708,7 +1766,11 @@ tty_cmd_clearline(struct tty *tty, const struct tty_ctx *ctx)
 void
 tty_cmd_clearendofline(struct tty *tty, const struct tty_ctx *ctx)
 {
-	u_int	nx = ctx->sx - ctx->ocx;
+	u_int	nx;
+
+	if (ctx->ocx > ctx->sx)
+		return;
+	nx = ctx->sx - ctx->ocx;
 
 	tty_default_attributes(tty, &ctx->defaults, ctx->palette, ctx->bg,
 	    ctx->s->hyperlinks);
@@ -1880,6 +1942,8 @@ tty_cmd_clearendofscreen(struct tty *tty, const struct tty_ctx *ctx)
 {
 	u_int	px, py, nx, ny;
 
+	if (ctx->sy == 0)
+		return;
 	tty_default_attributes(tty, &ctx->defaults, ctx->palette, ctx->bg,
 	    ctx->s->hyperlinks);
 
@@ -1889,12 +1953,12 @@ tty_cmd_clearendofscreen(struct tty *tty, const struct tty_ctx *ctx)
 	px = 0;
 	nx = ctx->sx;
 	py = ctx->ocy + 1;
-	ny = ctx->sy - ctx->ocy - 1;
+	ny = ctx->ocy < ctx->sy ? ctx->sy - ctx->ocy - 1 : 0;
 
 	tty_clear_pane_area(tty, ctx, py, ny, px, nx, ctx->bg);
 
 	px = ctx->ocx;
-	nx = ctx->sx - ctx->ocx;
+	nx = ctx->ocx <= ctx->sx ? ctx->sx - ctx->ocx : 0;
 	py = ctx->ocy;
 
 	tty_clear_pane_line(tty, ctx, py, px, nx, ctx->bg);
@@ -1905,6 +1969,8 @@ tty_cmd_clearstartofscreen(struct tty *tty, const struct tty_ctx *ctx)
 {
 	u_int	px, py, nx, ny;
 
+	if (ctx->sy == 0)
+		return;
 	tty_default_attributes(tty, &ctx->defaults, ctx->palette, ctx->bg,
 	    ctx->s->hyperlinks);
 
@@ -1930,6 +1996,8 @@ tty_cmd_clearscreen(struct tty *tty, const struct tty_ctx *ctx)
 {
 	u_int	px, py, nx, ny;
 
+	if (ctx->sy == 0)
+		return;
 	tty_default_attributes(tty, &ctx->defaults, ctx->palette, ctx->bg,
 	    ctx->s->hyperlinks);
 
@@ -1949,6 +2017,8 @@ tty_cmd_alignmenttest(struct tty *tty, const struct tty_ctx *ctx)
 {
 	u_int	i, j;
 
+	if (ctx->sy == 0)
+		return;
 	if (ctx->bigger) {
 		ctx->redraw_cb(ctx);
 		return;
@@ -1983,7 +2053,8 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 
 	if (ctx->num == 2) {
 		tty_draw_line(tty, s, 0, s->cy, screen_size_x(s),
-		    ctx->xoff - ctx->wox, py, &ctx->defaults, ctx->palette);
+		    ctx->xoff >= ctx->wox ? ctx->xoff - ctx->wox : 0,
+		    py, &ctx->defaults, ctx->palette);
 		return;
 	}
 
@@ -2254,6 +2325,8 @@ static void
 tty_region_pane(struct tty *tty, const struct tty_ctx *ctx, u_int rupper,
     u_int rlower)
 {
+	if (ctx->yoff + rupper < ctx->woy)
+		return;
 	tty_region(tty, ctx->yoff + rupper - ctx->woy,
 	    ctx->yoff + rlower - ctx->woy);
 }
@@ -2298,6 +2371,8 @@ tty_margin_off(struct tty *tty)
 static void
 tty_margin_pane(struct tty *tty, const struct tty_ctx *ctx)
 {
+	if (ctx->xoff < ctx->wox)
+		return;
 	tty_margin(tty, ctx->xoff - ctx->wox,
 	    ctx->xoff + ctx->sx - 1 - ctx->wox);
 }
@@ -2793,7 +2868,7 @@ tty_check_bg(struct tty *tty, struct colour_palette *palette,
 }
 
 static void
-tty_check_us(__unused struct tty *tty, struct colour_palette *palette,
+tty_check_us(struct tty *tty, struct colour_palette *palette,
     struct grid_cell *gc)
 {
 	int	c;
@@ -2824,7 +2899,7 @@ tty_colours_fg(struct tty *tty, const struct grid_cell *gc)
 	 * reset because some terminals do not clear bright correctly.
 	 */
 	if (tty->cell.fg >= 90 &&
-	    tty->cell.bg <= 97 &&
+	    tty->cell.fg <= 97 &&
 	    (gc->fg < 90 || gc->fg > 97))
 		tty_reset(tty);
 
@@ -2927,6 +3002,8 @@ tty_colours_us(struct tty *tty, const struct grid_cell *gc)
 	else if (tty_term_has(tty->term, TTYC_SETAL) &&
 	    tty_term_has(tty->term, TTYC_RGB))
 		tty_putcode_i(tty, TTYC_SETAL, c);
+	else
+		return;
 
 save:
 	/* Save the new values in the terminal current cell. */

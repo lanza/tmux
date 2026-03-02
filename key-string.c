@@ -238,13 +238,13 @@ key_string_get_modifiers(const char **string)
     } else if (strncasecmp(*string, "Hyper-",6) ==0) {
       modifiers |= KEYC_HYPER;
       *string +=6;
-    } else if (strncasecmp(*string, "Control-",6) ==0) {
+    } else if (strncasecmp(*string, "Control-",8) ==0) {
       modifiers |= KEYC_CTRL;
       *string +=8;
-    } else if (strncasecmp(*string, "Meta-",6) ==0) {
+    } else if (strncasecmp(*string, "Meta-",5) ==0) {
       modifiers |= KEYC_REAL_META;
       *string +=5;
-    } else if (strncasecmp(*string, "Alt-",6) ==0) {
+    } else if (strncasecmp(*string, "Alt-",4) ==0) {
       modifiers |= KEYC_META;
       *string +=4;
     } else {
@@ -264,7 +264,7 @@ key_string_lookup_string(const char *string)
 	enum utf8_state		 more;
 	utf8_char		 uc;
 	char			 m[MB_LEN_MAX + 1];
-	int			 mlen, kitty_keys;
+	int			 mlen;
 
 	/* Is this no key or any key? */
 	if (strcasecmp(string, "None") == 0)
@@ -277,7 +277,8 @@ key_string_lookup_string(const char *string)
 		if (sscanf(string + 2, "%x", &u) != 1)
 			return (KEYC_UNKNOWN);
 		if (u < 32)
-			return (u);
+			return (u | KEYC_LITERAL);
+		wctomb(NULL, 0);
 		mlen = wctomb(m, u);
 		if (mlen <= 0 || mlen > MB_LEN_MAX)
 			return (KEYC_UNKNOWN);
@@ -292,7 +293,7 @@ key_string_lookup_string(const char *string)
 			return (KEYC_UNKNOWN);
 		}
 		free(udp);
-		return (uc);
+		return (uc | KEYC_LITERAL);
 	}
 
 	/* Check for short Ctrl key. */
@@ -308,7 +309,6 @@ key_string_lookup_string(const char *string)
 	if (string == NULL || string[0] == '\0')
 		return (KEYC_UNKNOWN);
 
-	kitty_keys = options_get_number(global_options, "kitty-keys");
 	/* Is this a standard ASCII key? */
 	if (string[1] == '\0' && (u_char)string[0] <= 127) {
 		key = (u_char)string[0];
@@ -480,6 +480,8 @@ key_string_lookup_key(key_code key, int with_flags)
 		xsnprintf(tmp, sizeof tmp, "C-?");
 	else if (key >= 128)
 		xsnprintf(tmp, sizeof tmp, "\\%llo", key);
+	else
+		xsnprintf(tmp, sizeof tmp, "\\%llo", key);
 
 	strlcat(out, tmp, sizeof out);
 	goto out;
@@ -502,6 +504,8 @@ out:
 			strlcat(out, "B", sizeof out);
 		if (saved & KEYC_SENT)
 			strlcat(out, "S", sizeof out);
+		if (saved & KEYC_RELEASE)
+			strlcat(out, "R", sizeof out);
 		strlcat(out, "]", sizeof out);
 	}
 	return (out);

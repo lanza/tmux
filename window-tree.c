@@ -150,6 +150,8 @@ window_tree_pull_item(struct window_tree_itemdata *item, struct session **sp,
 		return;
 	if (item->type == WINDOW_TREE_SESSION) {
 		*wlp = (*sp)->curw;
+		if (*wlp == NULL)
+			return;
 		*wp = (*wlp)->window->active;
 		return;
 	}
@@ -260,6 +262,11 @@ window_tree_build_window(struct session *s, struct winlink *wl,
 	item->winlink = wl->idx;
 	item->pane = -1;
 
+	if (wl->window->active == NULL) {
+		window_tree_free_item(item);
+		data->item_size--;
+		return (0);
+	}
 	ft = format_create(NULL, NULL, FORMAT_PANE|wl->window->active->id, 0);
 	format_defaults(ft, NULL, s, wl, NULL);
 	text = format_expand(ft, data->format);
@@ -313,6 +320,12 @@ window_tree_build_session(struct session *s, void *modedata,
 	int				 expanded;
 	struct format_tree		*ft;
 
+	if (wl == NULL)
+		return;
+
+	if (wl->window->active == NULL)
+		return;
+
 	item = window_tree_add_item(data);
 	item->type = WINDOW_TREE_SESSION;
 	item->session = s->id;
@@ -351,7 +364,7 @@ window_tree_build(void *modedata, struct sort_criteria *sort_crit,
     uint64_t *tag, const char *filter)
 {
 	struct window_tree_modedata	*data = modedata;
-	struct session			*s, **l;
+	struct session			**l;
 	struct session_group		*sg, *current;
 	u_int				 n, i;
 
@@ -366,12 +379,11 @@ window_tree_build(void *modedata, struct sort_criteria *sort_crit,
 	l = sort_get_sessions(&n, sort_crit);
 	if (n == 0)
 		return;
-	s = l[n - 1];
 	for (i = 0; i < n; i++) {
 		if (data->squash_groups &&
-		    (sg = session_group_contains(s)) != NULL) {
-			if ((sg == current && s != data->fs.s) ||
-			    (sg != current && s != TAILQ_FIRST(&sg->sessions)))
+		    (sg = session_group_contains(l[i])) != NULL) {
+			if ((sg == current && l[i] != data->fs.s) ||
+			    (sg != current && l[i] != TAILQ_FIRST(&sg->sessions)))
 				continue;
 		}
 		window_tree_build_session(l[i], modedata, sort_crit, filter);
@@ -403,7 +415,7 @@ window_tree_draw_label(struct screen_write_ctx *ctx, u_int px, u_int py,
 	u_int	 ox, oy;
 
 	len = strlen(label);
-	if (sx == 0 || sy == 1 || len > sx)
+	if (sx == 0 || sy == 0 || sy == 1 || len > sx)
 		return;
 	ox = (sx - len + 1) / 2;
 	oy = (sy + 1) / 2;
@@ -432,6 +444,8 @@ window_tree_draw_session(struct window_tree_modedata *data, struct session *s,
 	char			*label;
 
 	total = winlink_count(&s->windows);
+	if (total == 0)
+		return;
 
 	memcpy(&gc, &grid_default_cell, sizeof gc);
 	colour = options_get_number(oo, "display-panes-colour");
@@ -532,6 +546,8 @@ window_tree_draw_session(struct window_tree_modedata *data, struct session *s,
 			width = each - 1;
 
 		screen_write_cursormove(ctx, cx + offset, cy, 0);
+		if (w->active == NULL)
+			return;
 		screen_write_preview(ctx, &w->active->base, width, sy);
 
 		xasprintf(&label, " %u:%s ", wl->idx, w->name);
@@ -567,6 +583,8 @@ window_tree_draw_window(struct window_tree_modedata *data, struct session *s,
 	char			*label;
 
 	total = window_count_panes(w);
+	if (total == 0)
+		return;
 
 	memcpy(&gc, &grid_default_cell, sizeof gc);
 	colour = options_get_number(oo, "display-panes-colour");
@@ -786,6 +804,10 @@ window_tree_get_key(void *modedata, void *itemdata, u_int line)
 
 	ft = format_create(NULL, NULL, FORMAT_NONE, 0);
 	window_tree_pull_item(item, &s, &wl, &wp);
+	if (s == NULL) {
+		format_free(ft);
+		return (KEYC_NONE);
+	}
 	if (item->type == WINDOW_TREE_SESSION)
 		format_defaults(ft, NULL, s, NULL, NULL);
 	else if (item->type == WINDOW_TREE_WINDOW)
@@ -821,6 +843,9 @@ window_tree_swap(void *cur_itemdata, void *other_itemdata,
 	window_tree_pull_item(other, &other_session, &other_winlink,
 	    &other_pane);
 
+	if (cur_session == NULL || cur_winlink == NULL ||
+	    other_session == NULL || other_winlink == NULL)
+		return (0);
 	if (cur_session != other_session)
 		return (0);
 
@@ -1149,7 +1174,7 @@ window_tree_mouse(struct window_tree_modedata *data, key_code key, u_int x,
 		x -= data->left;
 	else if (x != 0)
 		x--;
-	if (x == 0 || data->end == 0)
+	if (x == 0 || data->end == 0 || data->each == 0)
 		x = 0;
 	else {
 		x = x / data->each;
@@ -1233,7 +1258,8 @@ again:
 		break;
 	case 'm':
 		window_tree_pull_item(item, &ns, &nwl, &nwp);
-		server_set_marked(ns, nwl, nwp);
+		if (ns != NULL && nwl != NULL && nwp != NULL)
+			server_set_marked(ns, nwl, nwp);
 		mode_tree_build(data->data);
 		break;
 	case 'M':

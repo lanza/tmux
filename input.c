@@ -1042,7 +1042,8 @@ input_parse_buffer(struct window_pane *wp, u_char *buf, size_t len)
 	if (len == 0)
 		return;
 
-	window_update_activity(wp->window);
+	if (wp->window != NULL)
+		window_update_activity(wp->window);
 	wp->flags |= PANE_CHANGED;
 
 	/* Flag new input while in a mode. */
@@ -1317,7 +1318,7 @@ input_c0_dispatch(struct input_ctx *ictx)
 	case '\011':	/* HT */
 		/* Don't tab beyond the end of the line. */
 		cx = s->cx;
-		if (cx >= screen_size_x(s) - 1)
+		if (screen_size_x(s) == 0 || cx >= screen_size_x(s) - 1)
 			break;
 
 		/* Find the next tab point, or use the last column if none. */
@@ -1477,6 +1478,8 @@ input_csi_dispatch(struct input_ctx *ictx)
 	case INPUT_CSI_CBT:
 		/* Find the previous tab point, n times. */
 		cx = s->cx;
+		if (screen_size_x(s) == 0)
+			break;
 		if (cx > screen_size_x(s) - 1)
 			cx = screen_size_x(s) - 1;
 		n = input_get(ictx, 0, 1, 1);
@@ -1812,7 +1815,8 @@ input_csi_dispatch(struct input_ctx *ictx)
 				bit_clear(s->tabs, s->cx);
 			break;
 		case 3:
-			bit_nclear(s->tabs, 0, screen_size_x(s) - 1);
+			if (screen_size_x(s) > 0)
+				bit_nclear(s->tabs, 0, screen_size_x(s) - 1);
 			break;
 		default:
 			log_debug("%s: unknown '%c'", __func__, ictx->ch);
@@ -2072,76 +2076,152 @@ input_csi_dispatch_sm_graphics(__unused struct input_ctx *ictx)
 		input_reply(ictx, 1, "\033[?%d;3;%dS", n, o);
 #endif
 }
-/* Handle CSI kitty keyboard protocol. :for query */
+/* Handle CSI kitty keyboard protocol: query */
 static void
 input_csi_dispatch_kitk_query(struct input_ctx *ictx)
 {
-	enum kitty_kbd_flags flags =
-		ictx->ctx.s->kitty_kbd.flags[ictx->ctx.s->kitty_kbd.idx];
-	input_reply(ictx,1, "\033[?%uu", flags);
-	log_debug("%s kitty kbd: query flags: %u ", __func__,flags);
+	/*
+	 * Per the kitty keyboard protocol spec, respond with the currently
+	 * active flags. Applications detect protocol support from the
+	 * response format (CSI ? flags u), not from the flags value.
+	 */
+	struct screen	*s = ictx->ctx.s;
+	u_int		 flags = s->kitty_kbd.flags[s->kitty_kbd.idx];
+
+	input_reply(ictx, 1, "\033[?%uu", flags);
+	log_debug("%s kitty kbd: query active flags: %u", __func__, flags);
 }
 
-/* Handle CSI kitty keyboard protocol. :for push */
+/* Handle CSI kitty keyboard protocol: push */
 static void
 input_csi_dispatch_kitk_push(struct input_ctx *ictx)
 {
-	/* CSI > flags u  # for push, if flags omitted default to zero   */
-    uint8_t idx;
+	/* CSI > flags u  # for push, if flags omitted default to zero */
+	uint8_t idx;
 	int flags;
-	flags = input_get(ictx, 0, 0, 0) & KITTY_KBD_SUPPORTED;
+	flags = input_get(ictx, 0, 0, 0);
+	if (flags == -1)
+		return;
 	idx = ictx->ctx.s->kitty_kbd.idx;
 
 	if (idx + 1 >= nitems(ictx->ctx.s->kitty_kbd.flags)) {
-		/* Stack full, evict oldest by wrapping around */
-		idx = 0;
+		/* Stack full, evict oldest by shifting everything down */
+		memmove(&ictx->ctx.s->kitty_kbd.flags[0],
+		    &ictx->ctx.s->kitty_kbd.flags[1],
+		    (nitems(ictx->ctx.s->kitty_kbd.flags) - 1) *
+		    sizeof(ictx->ctx.s->kitty_kbd.flags[0]));
+		/* idx stays at top */
 	} else
 		idx++;
 
 	ictx->ctx.s->kitty_kbd.flags[idx] = flags;
 	ictx->ctx.s->kitty_kbd.idx = idx;
 
-	log_debug("%s kitty kbd: pushed new flags: 0x%03x", __func__,flags);
+	log_debug("%s kitty kbd: pushed new flags: 0x%03x", __func__, flags);
 
+	/* If kitty-keys is enabled globally, forward the enable to the terminal */
+	if (flags != 0 && options_get_number(global_options, "kitty-keys")) {
+		struct window_pane *wp = ictx->wp;
+		struct window *w;
+		struct client *c;
+
+		if (wp == NULL)
+			return;
+		w = wp->window;
+		if (w == NULL)
+			return;
+
+		/* Forward kitty flags enable to all clients attached to this window */
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->session != NULL &&
+			    c->session->curw != NULL &&
+			    c->session->curw->window == w &&
+			    c->tty.term != NULL) {
+				char seq[16];
+				xsnprintf(seq, sizeof seq, "\033[>%du", flags);
+				tty_puts(&c->tty, seq);
+				tty_puts(&c->tty, "\033[?u");
+			}
+		}
+	}
 }
 
-/* Handle CSI kitty keyboard protocol. :for push */
+/* Handle CSI kitty keyboard protocol: pop */
 static void
 input_csi_dispatch_kitk_pop(struct input_ctx *ictx)
 {
 	/* CSI < number u # to pop number entries, defaulting to 1 if unspecified */
-    uint8_t idx;
-	int i,count;
+	uint8_t idx;
+	int i, count, popped;
 	count = input_get(ictx, 0, 1, 1);
-	log_debug("%s kitty kbd: popping %d levels of flags", __func__,count);
+	if (count > (int)nitems(ictx->ctx.s->kitty_kbd.flags))
+		count = nitems(ictx->ctx.s->kitty_kbd.flags);
+	log_debug("%s kitty kbd: popping %d levels of flags", __func__, count);
 
-    idx = ictx->ctx.s->kitty_kbd.idx;
+	idx = ictx->ctx.s->kitty_kbd.idx;
+	popped = 0;
 	for (i = 0; i < count; i++) {
-		/* Reset flags. This ensures we get flags=0 when
-		 * over-popping */
 		ictx->ctx.s->kitty_kbd.flags[idx] = 0;
+		popped++;
 		if (idx == 0)
-			idx = nitems(ictx->ctx.s->kitty_kbd.flags) - 1;
-		else
-			idx--;
+			break; /* don't wrap below base */
+		idx--;
 	}
 	ictx->ctx.s->kitty_kbd.idx = idx;
 
+	/*
+	 * If kitty-keys is "always", prevent base flags from going to 0.
+	 * Analogous to extended-keys always override in INPUT_CSI_MODOFF.
+	 */
+	if (idx == 0 && ictx->ctx.s->kitty_kbd.flags[0] == 0 &&
+	    options_get_number(global_options, "kitty-keys") == 2)
+		ictx->ctx.s->kitty_kbd.flags[0] = KITTY_KBD_DISAMBIGUATE;
+
 	log_debug("kitty kbd: flags after pop: 0x%03x",
-			  ictx->ctx.s->kitty_kbd.flags[idx]);
+	    ictx->ctx.s->kitty_kbd.flags[idx]);
+
+	/* Forward pop to outer terminal — one pop per level actually popped. */
+	if (options_get_number(global_options, "kitty-keys")) {
+		struct window_pane *wp = ictx->wp;
+		struct window *w;
+		struct client *c;
+
+		if (wp == NULL)
+			return;
+		w = wp->window;
+		if (w == NULL)
+			return;
+
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->session != NULL &&
+			    c->session->curw != NULL &&
+			    c->session->curw->window == w &&
+			    c->tty.term != NULL) {
+				for (i = 0; i < popped; i++)
+					tty_puts(&c->tty, "\033[<u");
+			}
+		}
+	}
 }
+
+/* Handle CSI kitty keyboard protocol: set */
 static void
 input_csi_dispatch_kitk_set(struct input_ctx *ictx)
 {
-    struct screen *s;
-    uint8_t idx;
-    int flag_set;
-    int mode;
+	struct screen *s;
+	uint8_t idx;
+	int flag_set;
+	int mode;
 	/* CSI = flags ; mode u */
-    flag_set = input_get(ictx, 0, 0, 0) & KITTY_KBD_SUPPORTED;
-	mode = input_get(ictx, 1,1, 1);
+	flag_set = input_get(ictx, 0, 0, 0);
+	mode = input_get(ictx, 1, 1, 1);
+	if (flag_set == -1)
+		return;
 	s = ictx->ctx.s;
 	idx = s->kitty_kbd.idx;
+
+	log_debug("%s: flag_set=%d mode=%d current_flags=%u", __func__,
+		flag_set, mode, s->kitty_kbd.flags[idx]);
 
 	switch (mode) {
 	case 1:
@@ -2160,7 +2240,41 @@ input_csi_dispatch_kitk_set(struct input_ctx *ictx)
 		break;
 	}
 	log_debug("%s kitty kbd: flags after update: 0x%03x",
-			  __func__,s->kitty_kbd.flags[idx]);
+	    __func__, s->kitty_kbd.flags[idx]);
+
+	/*
+	 * If kitty-keys is "always", prevent base flags from going to 0.
+	 * Analogous to the override in input_csi_dispatch_kitk_pop().
+	 */
+	if (idx == 0 && s->kitty_kbd.flags[0] == 0 &&
+	    options_get_number(global_options, "kitty-keys") == 2)
+		s->kitty_kbd.flags[0] = KITTY_KBD_DISAMBIGUATE;
+
+	/* Forward updated flags to outer terminal */
+	if (options_get_number(global_options, "kitty-keys")) {
+		struct window_pane *wp = ictx->wp;
+		struct window *w;
+		struct client *c;
+		enum kitty_kbd_flags new_flags = s->kitty_kbd.flags[idx];
+
+		if (wp == NULL)
+			return;
+		w = wp->window;
+		if (w == NULL)
+			return;
+
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->session != NULL &&
+			    c->session->curw != NULL &&
+			    c->session->curw->window == w &&
+			    c->tty.term != NULL) {
+				char seq[16];
+				xsnprintf(seq, sizeof seq, "\033[=%d;1u",
+				    new_flags);
+				tty_puts(&c->tty, seq);
+			}
+		}
+	}
 }
 
 
@@ -2248,7 +2362,7 @@ input_csi_dispatch_winops(struct input_ctx *ictx)
 			case 0:
 			case 2:
 				screen_pop_title(sctx->s);
-				if (wp == NULL)
+				if (wp == NULL || w == NULL)
 					break;
 				notify_pane("pane-title-changed", wp);
 				server_redraw_window_borders(w);
@@ -2651,7 +2765,7 @@ input_handle_decrqss(struct input_ctx *ictx)
 	log_debug("%s: DECRQSS cursor -> Ps=%d (cstyle=%d mode=%#x)", __func__,
 	    ps, s->cstyle, s->mode);
 
-	input_reply(ictx, 1, "\033P1$r q%d q\033\\", ps);
+	input_reply(ictx, 1, "\033P1$r%d q\033\\", ps);
 	return (0);
 
 not_recognized:
@@ -2689,7 +2803,7 @@ input_dcs_dispatch(struct input_ctx *ictx)
 
 #ifdef ENABLE_SIXEL
 	w = wp->window;
-	if (buf[0] == 'q' && ictx->interm_len == 0) {
+	if (w != NULL && buf[0] == 'q' && ictx->interm_len == 0) {
 		if (input_split(ictx) != 0)
 			return (0);
 		p2 = input_get(ictx, 1, 0, 0);
@@ -2756,8 +2870,11 @@ input_exit_osc(struct input_ctx *ictx)
 	    ictx->input_end == INPUT_END_ST ? "ST" : "BEL");
 
 	option = 0;
-	while (*p >= '0' && *p <= '9')
+	while (*p >= '0' && *p <= '9') {
+		if (option > UINT_MAX / 10)
+			return;
 		option = option * 10 + *p++ - '0';
+	}
 	if (*p != ';' && *p != '\0')
 		return;
 	if (*p == ';')
@@ -2770,8 +2887,10 @@ input_exit_osc(struct input_ctx *ictx)
 		    options_get_number(wp->options, "allow-set-title") &&
 		    screen_set_title(sctx->s, p)) {
 			notify_pane("pane-title-changed", wp);
-			server_redraw_window_borders(wp->window);
-			server_status_window(wp->window);
+			if (wp->window != NULL) {
+				server_redraw_window_borders(wp->window);
+				server_status_window(wp->window);
+			}
 		}
 		break;
 	case 4:
@@ -2780,7 +2899,7 @@ input_exit_osc(struct input_ctx *ictx)
 	case 7:
 		if (utf8_isvalid(p)) {
 			screen_set_path(sctx->s, p);
-			if (wp != NULL) {
+			if (wp != NULL && wp->window != NULL) {
 				server_redraw_window_borders(wp->window);
 				server_status_window(wp->window);
 			}
@@ -2848,8 +2967,10 @@ input_exit_apc(struct input_ctx *ictx)
 	    options_get_number(wp->options, "allow-set-title") &&
 	    screen_set_title(sctx->s, ictx->input_buf)) {
 		notify_pane("pane-title-changed", wp);
-		server_redraw_window_borders(wp->window);
-		server_status_window(wp->window);
+		if (wp->window != NULL) {
+			server_redraw_window_borders(wp->window);
+			server_status_window(wp->window);
+		}
 	}
 }
 
@@ -2883,6 +3004,8 @@ input_exit_rename(struct input_ctx *ictx)
 	if (!utf8_isvalid(ictx->input_buf))
 		return;
 	w = wp->window;
+	if (w == NULL)
+		return;
 
 	if (ictx->input_len == 0) {
 		o = options_get_only(w->options, "automatic-rename");
@@ -2975,6 +3098,9 @@ input_osc_4(struct input_ctx *ictx, const char *p)
 	long			 idx;
 	int			 c, bad = 0, redraw = 0;
 	struct colour_palette	*palette = ictx->palette;
+
+	if (palette == NULL)
+		return;
 
 	copy = s = xstrdup(p);
 	while (s != NULL && *s != '\0') {
@@ -3192,7 +3318,7 @@ input_osc_133(struct input_ctx *ictx, const char *p)
 	u_int			 line = ictx->ctx.s->cy + gd->hsize;
 	struct grid_line	*gl;
 
-	if (line > gd->hsize + gd->sy - 1)
+	if (gd->sy == 0 || line > gd->hsize + gd->sy - 1)
 		return;
 	gl = grid_get_line(gd, line);
 
@@ -3215,6 +3341,9 @@ input_osc_52_reply(struct input_ctx *ictx, char clip)
 	int			 state;
 	const char		*buf;
 	size_t			 len;
+
+	if (ev == NULL)
+		return;
 
 	state = options_get_number(global_options, "get-clipboard");
 	if (state == 0)
@@ -3267,7 +3396,7 @@ input_osc_52_parse(struct input_ctx *ictx, const char *p, u_char **out,
 		return (0);
 	}
 
-	len = (strlen(end) / 4) * 3;
+	len = (strlen(end) / 4) * 3 + 3;
 	if (len == 0)
 		return (0);
 
@@ -3319,6 +3448,9 @@ input_osc_104(struct input_ctx *ictx, const char *p)
 	char	*copy, *s;
 	long	 idx;
 	int	 bad = 0, redraw = 0;
+
+	if (ictx->palette == NULL)
+		return;
 
 	if (*p == '\0') {
 		colour_palette_clear(ictx->palette);
@@ -3395,7 +3527,8 @@ input_request_timer_callback(__unused int fd, __unused short events, void *arg)
 	uint64_t		 t = get_timer();
 
 	TAILQ_FOREACH_SAFE(ir, &ictx->requests, entry, ir1) {
-		if (ir->t >= t - INPUT_REQUEST_TIMEOUT)
+		if (t < INPUT_REQUEST_TIMEOUT ||
+		    ir->t >= t - INPUT_REQUEST_TIMEOUT)
 			continue;
 		if (ir->type == INPUT_REQUEST_QUEUE)
 			input_send_reply(ir->ictx, ir->data);
@@ -3517,6 +3650,9 @@ input_request_clipboard_reply(struct input_request *ir, void *data)
 	struct input_request_clipboard_data	*cd = data;
 	int					 state;
 	char					*copy;
+
+	if (ev == NULL)
+		return;
 
 	state = options_get_number(global_options, "get-clipboard");
 	if (state == 0 || state == 1)

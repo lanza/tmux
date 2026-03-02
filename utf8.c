@@ -566,6 +566,8 @@ utf8_towc(const struct utf8_data *ud, wchar_t *wc)
 		return (UTF8_ERROR);
 	}
 	log_debug("UTF-8 %.*s is %05X", (int)ud->size, ud->data, (u_int)*wc);
+	if (*wc > 0x10ffff || (*wc >= 0xd800 && *wc <= 0xdfff))
+		return (UTF8_ERROR);
 	return (UTF8_DONE);
 }
 
@@ -574,6 +576,8 @@ enum utf8_state
 utf8_fromwc(wchar_t wc, struct utf8_data *ud)
 {
 	int	size, width;
+
+	memset(ud, 0, sizeof *ud);
 
 #ifdef HAVE_UTF8PROC
 	size = utf8proc_wctomb(ud->data, wc);
@@ -761,6 +765,8 @@ utf8_sanitize(const char *src)
 			while (*++src != '\0' && more == UTF8_MORE)
 				more = utf8_append(&ud, *src);
 			if (more == UTF8_DONE) {
+				if (ud.width == 0)
+					continue;
 				dst = xreallocarray(dst, n + ud.width,
 				    sizeof *dst);
 				for (i = 0; i < ud.width; i++)

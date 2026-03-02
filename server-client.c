@@ -130,7 +130,8 @@ server_client_set_overlay(struct client *c, u_int delay,
 		c->tty.flags |= TTY_FREEZE;
 	if (c->overlay_mode == NULL)
 		c->tty.flags |= TTY_NOCURSOR;
-	window_update_focus(c->session->curw->window);
+	if (c->session != NULL && c->session->curw != NULL)
+		window_update_focus(c->session->curw->window);
 	server_redraw_client(c);
 }
 
@@ -156,7 +157,7 @@ server_client_clear_overlay(struct client *c)
 	c->overlay_data = NULL;
 
 	c->tty.flags &= ~(TTY_FREEZE|TTY_NOCURSOR);
-	if (c->session != NULL)
+	if (c->session != NULL && c->session->curw != NULL)
 		window_update_focus(c->session->curw->window);
 	server_redraw_client(c);
 }
@@ -195,7 +196,7 @@ server_client_overlay_range(u_int x, u_int y, u_int sx, u_int sy, u_int px,
 	u_int	ox, onx;
 
 	/* Trivial case of no overlap in the y direction. */
-	if (py < y || py > y + sy - 1) {
+	if (sy == 0 || py < y || py > y + sy - 1) {
 		server_client_ensure_ranges(r, 1);
 		r->ranges[0].px = px;
 		r->ranges[0].nx = nx;
@@ -238,11 +239,11 @@ server_client_check_nested(struct client *c)
 	struct window_pane	*wp;
 
 	envent = environ_find(c->environ, "TMUX");
-	if (envent == NULL || *envent->value == '\0')
+	if (envent == NULL || envent->value == NULL || *envent->value == '\0')
 		return (0);
 
 	RB_FOREACH(wp, window_pane_tree, &all_window_panes) {
-		if (strcmp(wp->tty, c->ttyname) == 0)
+		if (c->ttyname != NULL && strcmp(wp->tty, c->ttyname) == 0)
 			return (1);
 	}
 	return (0);
@@ -397,7 +398,8 @@ server_client_attached_lost(struct client *c)
 		found = NULL;
 		TAILQ_FOREACH(loop, &clients, entry) {
 			s = loop->session;
-			if (loop == c || s == NULL || s->curw->window != w)
+			if (loop == c || s == NULL || s->curw == NULL ||
+			    s->curw->window != w)
 				continue;
 			if (found == NULL || timercmp(&loop->activity_time,
 			    &found->activity_time, >))
@@ -423,7 +425,7 @@ server_client_set_session(struct client *c, struct session *s)
 
 	if (old != NULL && old->curw != NULL)
 		window_update_focus(old->curw->window);
-	if (s != NULL) {
+	if (s != NULL && s->curw != NULL) {
 		s->curw->window->latest = c;
 		recalculate_sizes();
 		window_update_focus(s->curw->window);
@@ -488,6 +490,9 @@ server_client_lost(struct client *c)
 
 	free(c->title);
 	free((void *)c->cwd);
+	free(c->path);
+	free(c->exit_session);
+	free(c->exit_message);
 
 	evtimer_del(&c->repeat_timer);
 	evtimer_del(&c->click_timer);
@@ -617,7 +622,7 @@ server_client_check_mouse_in_pane(struct window_pane *wp, u_int px, u_int py,
 	struct options		*wo = w->options;
 	struct window_pane	*fwp;
 	int			 pane_status, sb, sb_pos, sb_w, sb_pad;
-	u_int			 line, sl_top, sl_bottom;
+	u_int			 line = 0, sl_top, sl_bottom;
 
 	sb = options_get_number(wo, "pane-scrollbars");
 	sb_pos = options_get_number(wo, "pane-scrollbars-position");
@@ -630,9 +635,12 @@ server_client_check_mouse_in_pane(struct window_pane *wp, u_int px, u_int py,
 		sb_w = 0;
 		sb_pad = 0;
 	}
-	if (pane_status == PANE_STATUS_TOP)
-		line = wp->yoff - 1;
-	else if (pane_status == PANE_STATUS_BOTTOM)
+	if (pane_status == PANE_STATUS_TOP) {
+		if (wp->yoff > 0)
+			line = wp->yoff - 1;
+		else
+			line = 0;
+	} else if (pane_status == PANE_STATUS_BOTTOM)
 		line = wp->yoff + wp->sy;
 
 	/* Check if point is within the pane or scrollbar. */
@@ -643,18 +651,22 @@ server_client_check_mouse_in_pane(struct window_pane *wp, u_int px, u_int py,
 	    ((sb_pos == PANE_SCROLLBARS_RIGHT &&
 	    px < wp->xoff + wp->sx + sb_pad + sb_w) ||
 	    (sb_pos == PANE_SCROLLBARS_LEFT &&
+	    wp->xoff >= sb_pad + sb_w &&
 	    px < wp->xoff + wp->sx - sb_pad - sb_w))) {
 		/* Check if in the scrollbar. */
 		if ((sb_pos == PANE_SCROLLBARS_RIGHT &&
 		    (px >= wp->xoff + wp->sx + sb_pad &&
 		    px < wp->xoff + wp->sx + sb_pad + sb_w)) ||
 		    (sb_pos == PANE_SCROLLBARS_LEFT &&
+		    wp->xoff >= sb_pad + sb_w &&
 		    (px >= wp->xoff - sb_pad - sb_w &&
 		    px < wp->xoff - sb_pad))) {
 			/* Check where inside the scrollbar. */
 			sl_top = wp->yoff + wp->sb_slider_y;
-			sl_bottom = (wp->yoff + wp->sb_slider_y +
-			    wp->sb_slider_h - 1);
+			if (wp->sb_slider_h > 0)
+				sl_bottom = sl_top + wp->sb_slider_h - 1;
+			else
+				sl_bottom = sl_top;
 			if (py < sl_top)
 				return (SCROLLBAR_UP);
 			else if (py >= sl_top &&
@@ -693,12 +705,12 @@ server_client_check_mouse(struct client *c, struct key_event *event)
 {
 	struct mouse_event	*m = &event->m;
 	struct session		*s = c->session, *fs;
-	struct window		*w = s->curw->window;
+	struct window		*w;
 	struct winlink		*fwl;
 	struct window_pane	*wp, *fwp;
 	u_int			 x, y, b, sx, sy, px, py, sl_mpos = 0;
 	int			 ignore = 0;
-	key_code		 key;
+	key_code		 key = KEYC_UNKNOWN;
 	struct timeval		 tv;
 	struct style_range	*sr;
 	enum { NOTYPE,
@@ -711,6 +723,10 @@ server_client_check_mouse(struct client *c, struct key_event *event)
 	       DOUBLE,
 	       TRIPLE } type = NOTYPE;
 	enum mouse_where where = NOWHERE;
+
+	if (s->curw == NULL)
+		return (KEYC_UNKNOWN);
+	w = s->curw->window;
 
 	log_debug("%s mouse %02x at %u,%u (last %u,%u) (%d)", c->name, m->b,
 	    m->x, m->y, m->lx, m->ly, c->tty.mouse_drag_flag);
@@ -1495,13 +1511,13 @@ have_event:
 			break;
 		case MOUSE_BUTTON_10:
 			if (where == PANE)
-				key = KEYC_MOUSEUP1_PANE;
+				key = KEYC_MOUSEUP10_PANE;
 			if (where == STATUS)
-				key = KEYC_MOUSEUP1_STATUS;
+				key = KEYC_MOUSEUP10_STATUS;
 			if (where == STATUS_LEFT)
-				key = KEYC_MOUSEUP1_STATUS_LEFT;
+				key = KEYC_MOUSEUP10_STATUS_LEFT;
 			if (where == STATUS_RIGHT)
-				key = KEYC_MOUSEUP1_STATUS_RIGHT;
+				key = KEYC_MOUSEUP10_STATUS_RIGHT;
 			if (where == STATUS_DEFAULT)
 				key = KEYC_MOUSEUP10_STATUS_DEFAULT;
 			if (where == SCROLLBAR_UP)
@@ -1509,9 +1525,9 @@ have_event:
 			if (where == SCROLLBAR_SLIDER)
 				key = KEYC_MOUSEUP10_SCROLLBAR_SLIDER;
 			if (where == SCROLLBAR_DOWN)
-				key = KEYC_MOUSEUP1_SCROLLBAR_DOWN;
+				key = KEYC_MOUSEUP10_SCROLLBAR_DOWN;
 			if (where == BORDER)
-				key = KEYC_MOUSEUP1_BORDER;
+				key = KEYC_MOUSEUP10_BORDER;
 			break;
 		case MOUSE_BUTTON_11:
 			if (where == PANE)
@@ -2344,6 +2360,8 @@ server_client_update_latest(struct client *c)
 
 	if (c->session == NULL)
 		return;
+	if (c->session->curw == NULL)
+		return;
 	w = c->session->curw->window;
 
 	if (w->latest == c)
@@ -2404,12 +2422,14 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 		goto out;
 	wl = s->curw;
 
-	/* Update the activity timer. */
-	memcpy(&c->last_activity_time, &c->activity_time,
-	    sizeof c->last_activity_time);
-	if (gettimeofday(&c->activity_time, NULL) != 0)
-		fatal("gettimeofday failed");
-	session_update_activity(s, &c->activity_time);
+	/* Update the activity timer (skip for release events). */
+	if (~key & KEYC_RELEASE) {
+		memcpy(&c->last_activity_time, &c->activity_time,
+		    sizeof c->last_activity_time);
+		if (gettimeofday(&c->activity_time, NULL) != 0)
+			fatal("gettimeofday failed");
+		session_update_activity(s, &c->activity_time);
+	}
 
 	/* Check for mouse keys. */
 	m->valid = 0;
@@ -2447,6 +2467,10 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 	if (server_client_is_bracket_paste (c, key))
 		goto paste_key;
 
+	/* Release events bypass key bindings — forward directly to pane. */
+	if (key & KEYC_RELEASE)
+		goto forward_key;
+
 	/* Treat everything as a regular key when pasting is detected. */
 	if (!KEYC_IS_MOUSE(key) &&
 	    key != KEYC_FOCUS_IN &&
@@ -2475,7 +2499,7 @@ table_changed:
 	 */
 	prefix = (key_code)options_get_number(s->options, "prefix");
 	prefix2 = (key_code)options_get_number(s->options, "prefix2");
-	key0 = (key & (KEYC_MASK_KEY|KEYC_MASK_MODIFIERS));
+	key0 = (key & (KEYC_MASK_KEY|KEYC_MASK_MODIFIERS)) & ~KEYC_CAPS_LOCK;
 	if ((key0 == (prefix & (KEYC_MASK_KEY|KEYC_MASK_MODIFIERS)) ||
 	    key0 == (prefix2 & (KEYC_MASK_KEY|KEYC_MASK_MODIFIERS))) &&
 	    strcmp(table->name, "prefix") != 0) {
@@ -2628,7 +2652,7 @@ forward_key:
 paste_key:
 	if (c->flags & CLIENT_READONLY)
 		goto out;
-	if (event->buf != NULL)
+	if (wp != NULL && event->buf != NULL)
 		window_pane_paste(wp, key, event->buf, event->len);
 	key = KEYC_NONE;
 	goto out;
@@ -2663,6 +2687,17 @@ server_client_handle_key(struct client *c, struct key_event *event)
 	if (event->key == KEYC_REPORT_DARK_THEME) {
 		server_client_report_theme(c, THEME_DARK);
 		return (0);
+	}
+
+	/*
+	 * Release events bypass overlays, prompts, and messages — queue
+	 * directly for the key callback where the release bypass forwards
+	 * them to the pane.
+	 */
+	if (event->key & KEYC_RELEASE) {
+		item = cmdq_get_callback(server_client_key_callback, event);
+		cmdq_append(c, item);
+		return (1);
 	}
 
 	/*
@@ -2969,6 +3004,8 @@ server_client_reset_state(struct client *c)
 	int			 mode = 0, cursor, flags;
 	u_int			 cx = 0, cy = 0, ox, oy, sx, sy, n;
 
+	if (wp == NULL)
+		return;
 	if (c->flags & (CLIENT_CONTROL|CLIENT_SUSPENDED))
 		return;
 
@@ -3001,7 +3038,11 @@ server_client_reset_state(struct client *c)
 		if (n == 0)
 			cy = status_prompt_line_at(c);
 		else {
-			n = status_line_size(c) - status_prompt_line_at(c);
+			if (status_line_size(c) > status_prompt_line_at(c))
+				n = status_line_size(c) -
+				    status_prompt_line_at(c);
+			else
+				n = 1;
 			if (n <= tty->sy)
 				cy = tty->sy - n;
 			else
@@ -3053,6 +3094,26 @@ server_client_reset_state(struct client *c)
 	/* Set the terminal mode and reset attributes. */
 	tty_update_mode(tty, mode, s);
 	tty_reset(tty);
+
+	/*
+	 * Update outer terminal kitty keyboard mode to match the active
+	 * pane's flags. Use CSI = flags ; 1 u (set/replace) to avoid
+	 * growing the outer terminal's stack.
+	 *
+	 * For "on" (==1), only sync to terminals known to support kitty
+	 * (TTY_HAVEDA_KITTY). For "always" (==2), sync unconditionally.
+	 */
+	if (s != NULL && options_get_number(global_options, "kitty-keys") &&
+	    (options_get_number(global_options, "kitty-keys") == 2 ||
+	    (tty->flags & TTY_HAVEDA_KITTY))) {
+		int new_kitty = s->kitty_kbd.flags[s->kitty_kbd.idx];
+		if (new_kitty != tty->kitty_state) {
+			char seq[32];
+			xsnprintf(seq, sizeof seq, "\033[=%d;1u", new_kitty);
+			tty_puts(tty, seq);
+			tty->kitty_state = new_kitty;
+		}
+	}
 
 	/* All writing must be done, send a sync end (if it was started). */
 	tty_sync_end(tty);
@@ -3144,7 +3205,9 @@ server_client_check_exit(struct client *c)
 		break;
 	}
 	free(c->exit_session);
+	c->exit_session = NULL;
 	free(c->exit_message);
+	c->exit_message = NULL;
 }
 
 /* Redraw timer callback. */
@@ -3241,11 +3304,11 @@ server_client_check_redraw(struct client *c)
 				if (wp->flags & (PANE_REDRAW)) {
 					log_debug("%s: pane %%%u needs redraw",
 					    c->name, wp->id);
-					c->redraw_panes |= (1 << bit);
+					c->redraw_panes |= (1ULL << bit);
 				} else if (wp->flags & PANE_REDRAWSCROLLBAR) {
 					log_debug("%s: pane %%%u scrollbar "
 					    "needs redraw", c->name, wp->id);
-					c->redraw_scrollbars |= (1 << bit);
+					c->redraw_scrollbars |= (1ULL << bit);
 				}
 				if (++bit == 64) {
 					/*
@@ -3282,10 +3345,10 @@ server_client_check_redraw(struct client *c)
 			if (wp->flags & PANE_REDRAW)
 				redraw_pane = 1;
 			else if (c->flags & CLIENT_REDRAWPANES) {
-				if (c->redraw_panes & (1 << bit))
+				if (c->redraw_panes & (1ULL << bit))
 					redraw_pane = 1;
 			} else if (c->flags & CLIENT_REDRAWSCROLLBARS) {
-				if (c->redraw_scrollbars & (1 << bit))
+				if (c->redraw_scrollbars & (1ULL << bit))
 					redraw_scrollbar_only = 1;
 			}
 			bit++;
@@ -3364,6 +3427,8 @@ server_client_set_path(struct client *c)
 	const char	*path;
 
 	if (s->curw == NULL)
+		return;
+	if (s->curw->window->active == NULL)
 		return;
 	if (s->curw->window->active->base.path == NULL)
 		path = "";
@@ -3457,6 +3522,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 			fatal("gettimeofday failed");
 
 		tty_start_tty(&c->tty);
+		tty_send_requests(&c->tty);
 		server_redraw_client(c);
 		recalculate_sizes();
 
@@ -3524,7 +3590,8 @@ server_client_command_done(struct cmdq_item *item, __unused void *data)
 	else if (~c->flags & CLIENT_EXIT) {
 		if (c->flags & CLIENT_CONTROL)
 			control_ready(c);
-		tty_send_requests(&c->tty);
+		if (c->flags & CLIENT_TERMINAL)
+			tty_send_requests(&c->tty);
 	}
 	return (CMD_RETURN_NORMAL);
 }
@@ -3554,6 +3621,8 @@ server_client_dispatch_command(struct client *c, struct imsg *imsg)
 	if (len > 0 && buf[len - 1] != '\0')
 		return (-1);
 
+	if (data.argc < 0)
+		return (-1);
 	if (cmd_unpack_argv(buf, len, data.argc, &argv) != 0) {
 		cause = xstrdup("command too long");
 		goto error;
@@ -3569,6 +3638,8 @@ server_client_dispatch_command(struct client *c, struct imsg *imsg)
 		switch (pr->status) {
 		case CMD_PARSE_ERROR:
 			cause = pr->error;
+			args_free_values(values, argc);
+			free(values);
 			goto error;
 		case CMD_PARSE_SUCCESS:
 			break;
@@ -3628,20 +3699,21 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		if (datalen != sizeof flags)
 			return (-1);
 		memcpy(&flags, data, sizeof flags);
-		c->flags |= flags;
+		c->flags |= (flags & CLIENT_IDENTIFYFLAGS);
 		log_debug("client %p IDENTIFY_FLAGS %#x", c, flags);
 		break;
 	case MSG_IDENTIFY_LONGFLAGS:
 		if (datalen != sizeof longflags)
 			return (-1);
 		memcpy(&longflags, data, sizeof longflags);
-		c->flags |= longflags;
+		c->flags |= (longflags & CLIENT_IDENTIFYFLAGS);
 		log_debug("client %p IDENTIFY_LONGFLAGS %#llx", c,
 		    (unsigned long long)longflags);
 		break;
 	case MSG_IDENTIFY_TERM:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			return (-1);
+		free(c->term_name);
 		c->term_name = xstrdup(data);
 		log_debug("client %p IDENTIFY_TERM %s", c, data);
 		break;
@@ -3656,12 +3728,14 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	case MSG_IDENTIFY_TTYNAME:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			return (-1);
+		free(c->ttyname);
 		c->ttyname = xstrdup(data);
 		log_debug("client %p IDENTIFY_TTYNAME %s", c, data);
 		break;
 	case MSG_IDENTIFY_CWD:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			return (-1);
+		free((void *)c->cwd);
 		if (access(data, X_OK) == 0)
 			c->cwd = xstrdup(data);
 		else if ((home = find_home()) != NULL)
@@ -3708,7 +3782,7 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		c->term_name = xstrdup("unknown");
 	}
 
-	if (c->ttyname == NULL || *c->ttyname != '\0')
+	if (c->ttyname != NULL && *c->ttyname != '\0')
 		name = xstrdup(c->ttyname);
 	else
 		xasprintf(&name, "client-%ld", (long)c->pid);
@@ -3918,6 +3992,8 @@ server_client_get_pane(struct client *c)
 	if (s == NULL)
 		return (NULL);
 
+	if (s->curw == NULL)
+		return (NULL);
 	if (~c->flags & CLIENT_ACTIVEPANE)
 		return (s->curw->window->active);
 	cw = server_client_get_client_window(c, s->curw->window->id);
@@ -3936,6 +4012,8 @@ server_client_set_pane(struct client *c, struct window_pane *wp)
 	if (s == NULL)
 		return;
 
+	if (s->curw == NULL)
+		return;
 	cw = server_client_add_client_window(c, s->curw->window->id);
 	cw->pane = wp;
 	log_debug("%s pane now %%%u", c->name, wp->id);
@@ -3978,6 +4056,7 @@ server_client_print(struct client *c, int parse, struct evbuffer *evb)
 			msg = EVBUFFER_DATA(evb);
 			if (msg[size - 1] != '\0')
 				evbuffer_add(evb, "", 1);
+			msg = EVBUFFER_DATA(evb);
 		}
 	}
 	log_debug("%s: %s", __func__, msg);
@@ -4003,6 +4082,8 @@ server_client_print(struct client *c, int parse, struct evbuffer *evb)
 	}
 
 	wp = server_client_get_pane(c);
+	if (wp == NULL)
+		goto out;
 	wme = TAILQ_FIRST(&wp->modes);
 	if (wme == NULL || wme->mode != &window_view_mode)
 		window_pane_set_mode(wp, NULL, &window_view_mode, NULL, NULL);

@@ -66,8 +66,11 @@ cmd_break_pane_exec(struct cmd *self, struct cmdq_item *item)
 	if (args_has(args, 'a') || before) {
 		if (target->wl != NULL)
 			idx = winlink_shuffle_up(dst_s, target->wl, before);
-		else
+		else {
+			if (dst_s->curw == NULL)
+				return (CMD_RETURN_ERROR);
 			idx = winlink_shuffle_up(dst_s, dst_s->curw, before);
+		}
 		if (idx == -1)
 			return (CMD_RETURN_ERROR);
 	}
@@ -122,7 +125,12 @@ cmd_break_pane_exec(struct cmd *self, struct cmdq_item *item)
 
 	if (idx == -1)
 		idx = -1 - options_get_number(dst_s->options, "base-index");
-	wl = session_attach(dst_s, w, idx, &cause); /* can't fail */
+	wl = session_attach(dst_s, w, idx, &cause);
+	if (wl == NULL) {
+		cmdq_error(item, "%s", cause);
+		free(cause);
+		return (CMD_RETURN_ERROR);
+	}
 	if (!args_has(args, 'd')) {
 		session_select(dst_s, wl->idx);
 		cmd_find_from_session(current, dst_s, 0);

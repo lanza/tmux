@@ -207,10 +207,12 @@ control_free_sub(struct control_state *cs, struct control_sub *csub)
 
 	RB_FOREACH_SAFE(csp, control_sub_panes, &csub->panes, csp1) {
 		RB_REMOVE(control_sub_panes, &csub->panes, csp);
+		free(csp->last);
 		free(csp);
 	}
 	RB_FOREACH_SAFE(csw, control_sub_windows, &csub->windows, csw1) {
 		RB_REMOVE(control_sub_windows, &csub->windows, csw);
+		free(csw->last);
 		free(csw);
 	}
 	free(csub->last);
@@ -298,6 +300,7 @@ control_reset_offsets(struct client *c)
 	struct control_pane	*cp, *cp1;
 
 	RB_FOREACH_SAFE(cp, control_panes, &cs->panes, cp1) {
+		control_discard_pane(c, cp);
 		RB_REMOVE(control_panes, &cs->panes, cp);
 		free(cp);
 	}
@@ -456,6 +459,7 @@ control_check_age(struct client *c, struct window_pane *wp,
 	} else {
 		if (age < CONTROL_MAXIMUM_AGE)
 			return (0);
+		free(c->exit_message);
 		c->exit_message = xstrdup("too far behind");
 		c->flags |= CLIENT_EXIT;
 		control_discard(c);
@@ -472,6 +476,8 @@ control_write_output(struct client *c, struct window_pane *wp)
 	struct control_block	*cb;
 	size_t			 new_size;
 
+	if (c->session == NULL)
+		return;
 	if (winlink_find_by_window(&c->session->windows, wp->window) == NULL)
 		return;
 
@@ -542,6 +548,47 @@ control_error_callback(__unused struct bufferevent *bufev,
 	c->flags |= CLIENT_EXIT;
 }
 
+/*
+ * Check if a control mode input line is a focus sequence sent by iTerm2.
+ * iTerm2 sends focus events as:
+ *   send -t %N 0x1b 0x5b; send -lt %N O   (focus out)
+ *   send -t %N 0x1b 0x5b; send -lt %N I   (focus in)
+ * These get split on the semicolon and the ESC byte is kitty-encoded,
+ * breaking the sequence.  Since tmux handles focus internally via
+ * window_pane_update_focus, these should be silently dropped.
+ */
+static int
+control_is_focus_sequence(const char *line)
+{
+	const char	*p;
+
+	/* Must start with "send " or "send-keys ". */
+	if (strncmp(line, "send ", 5) == 0)
+		p = line + 5;
+	else if (strncmp(line, "send-keys ", 10) == 0)
+		p = line + 10;
+	else
+		return (0);
+
+	/* Skip "-t %N " or "-t \"%N\" ". */
+	p = strstr(p, "0x1b 0x5b");
+	if (p == NULL)
+		return (0);
+
+	/* Check that the remainder is "; send -lt %N O" or "I". */
+	p = strstr(p, "; send ");
+	if (p == NULL)
+		return (0);
+
+	/* Check the last character is O or I. */
+	size_t len = strlen(line);
+	if (len < 1)
+		return (0);
+	if (line[len - 1] == 'O' || line[len - 1] == 'I')
+		return (1);
+	return (0);
+}
+
 /* Control client input callback. Read lines and fire commands. */
 static void
 control_read_callback(__unused struct bufferevent *bufev, void *data)
@@ -562,6 +609,14 @@ control_read_callback(__unused struct bufferevent *bufev, void *data)
 			free(line);
 			c->flags |= CLIENT_EXIT;
 			break;
+		}
+
+		/* Drop focus sequences from iTerm2 (handled by tmux). */
+		if (control_is_focus_sequence(line)) {
+			log_debug("%s: %s: dropping focus sequence: %s",
+			    __func__, c->name, line);
+			free(line);
+			continue;
 		}
 
 		state = cmdq_new_state(NULL, NULL, CMDQ_STATE_CONTROL);
@@ -604,6 +659,99 @@ control_flush_all_blocks(struct client *c)
 	}
 }
 
+/*
+ * Check if position i in buf (of length len) is the start of a CSI sequence
+ * that should be filtered from control mode output to prevent the wrapper
+ * application (e.g., iTerm2) from deadlocking or changing input behavior.
+ *
+ * Filtered sequences:
+ *   - Kitty keyboard push/pop/set: CSI > N u, CSI < N u, CSI = N;M u
+ *     These trigger addJoinedSideEffect in iTerm2's terminalKeyReporting-
+ *     FlagsDidChange, which deadlocks the mutation thread against the main
+ *     thread during pane creation, window setup, and initialization.
+ *   - Kitty keyboard query/response: CSI ? u, CSI ? N u
+ *   - Focus tracking: CSI ? 1004 h/l
+ *   - Mouse modes: CSI ? 1000/1002/1003/1005/1006 h/l
+ *   - Bracketed paste: CSI ? 2004 h/l
+ *
+ * Returns the length of the sequence if it should be stripped, 0 otherwise.
+ */
+
+/* DEC private modes that affect input behavior. */
+static const int control_filter_modes[] = {
+	1000, 1002, 1003, 1004, 1005, 1006, 2004
+};
+
+static size_t
+control_filter_csi_len(const u_char *buf, size_t len, size_t i)
+{
+	size_t	j;
+	u_int	k;
+	long	mode;
+	char	tmp[16], *endptr;
+
+	/* Need at least ESC [ X Y = 4 bytes. */
+	if (i + 3 >= len)
+		return (0);
+	if (buf[i] != 0x1b || buf[i + 1] != '[')
+		return (0);
+
+	switch (buf[i + 2]) {
+	case '<':
+	case '=':
+	case '>':
+		/*
+		 * Kitty keyboard push/pop/set (CSI > N u, CSI < N u,
+		 * CSI = N;M u).  Always filter — these trigger
+		 * addJoinedSideEffect in iTerm2 which deadlocks the
+		 * mutation thread against the main thread during pane
+		 * creation and window setup.
+		 */
+		for (j = i + 3; j < len; j++) {
+			if (buf[j] == 'u')
+				return (j - i + 1);
+			if (buf[j] >= '0' && buf[j] <= '9')
+				continue;
+			if (buf[j] == ';')
+				continue;
+			return (0);
+		}
+		return (0);
+	case '?':
+		/*
+		 * CSI ? can be:
+		 *   CSI ? u or CSI ? N u — kitty query/response (strip)
+		 *   CSI ? N h/l — DEC private mode set/reset (strip if input-affecting)
+		 */
+		for (j = i + 3; j < len; j++) {
+			if (buf[j] == 'u')
+				return (j - i + 1); /* Kitty query/response. */
+			if (buf[j] == 'h' || buf[j] == 'l') {
+				if (j - (i + 3) == 0 || j - (i + 3) >= sizeof tmp)
+					return (0);
+				memcpy(tmp, buf + i + 3, j - (i + 3));
+				tmp[j - (i + 3)] = '\0';
+				mode = strtol(tmp, &endptr, 10);
+				if (*endptr != '\0')
+					return (0);
+				for (k = 0; k < nitems(control_filter_modes); k++) {
+					if (mode == control_filter_modes[k])
+						return (j - i + 1);
+				}
+				return (0);
+			}
+			if (buf[j] >= '0' && buf[j] <= '9')
+				continue;
+			if (buf[j] == ';')
+				continue;
+			return (0);
+		}
+		return (0);
+	default:
+		return (0);
+	}
+}
+
 /* Append data to buffer. */
 static struct evbuffer *
 control_append_data(struct client *c, struct control_pane *cp, uint64_t age,
@@ -611,7 +759,7 @@ control_append_data(struct client *c, struct control_pane *cp, uint64_t age,
 {
 	u_char	*new_data;
 	size_t	 new_size, start;
-	u_int	 i;
+	size_t	 i;
 
 	if (message == NULL) {
 		message = evbuffer_new();
@@ -629,6 +777,20 @@ control_append_data(struct client *c, struct control_pane *cp, uint64_t age,
 	if (new_size < size)
 		fatalx("not enough data: %zu < %zu", new_size, size);
 	for (i = 0; i < size; i++) {
+		/*
+		 * Strip escape sequences that should not leak to the
+		 * control mode wrapper (iTerm2): kitty keyboard protocol
+		 * push/pop/set/query, and DEC private modes that affect
+		 * input behavior (focus, mouse, bracketed paste).
+		 */
+		if (new_data[i] == 0x1b) {
+			size_t	skip = control_filter_csi_len(new_data, size,
+			    i);
+			if (skip > 0) {
+				i += skip - 1;
+				continue;
+			}
+		}
 		if (new_data[i] < ' ' || new_data[i] == '\\') {
 			evbuffer_add_printf(message, "\\%03o", new_data[i]);
 		} else {
@@ -837,9 +999,9 @@ control_stop(struct client *c)
 	if (evtimer_initialized(&cs->subs_timer))
 		evtimer_del(&cs->subs_timer);
 
+	control_reset_offsets(c);
 	TAILQ_FOREACH_SAFE(cb, &cs->all_blocks, all_entry, cb1)
 		control_free_block(cs, cb);
-	control_reset_offsets(c);
 
 	free(cs);
 }
@@ -1042,6 +1204,9 @@ control_check_subs_timer(__unused int fd, __unused short events, void *data)
 	int			 have_session = 0, have_all_panes = 0;
 	int			 have_all_windows = 0;
 
+	if (s == NULL)
+		return;
+
 	log_debug("%s: timer fired", __func__);
 	evtimer_add(&cs->subs_timer, &tv);
 
@@ -1133,6 +1298,9 @@ control_add_sub(struct client *c, const char *name, enum control_sub_type type,
 	find.name = (char *)name;
 	if ((csub = RB_FIND(control_subs, &cs->subs, &find)) != NULL)
 		control_free_sub(cs, csub);
+
+	if ((type == CONTROL_SUB_PANE || type == CONTROL_SUB_WINDOW) && id < 0)
+		return;
 
 	csub = xcalloc(1, sizeof *csub);
 	csub->name = xstrdup(name);

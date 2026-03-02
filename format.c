@@ -630,6 +630,8 @@ format_cb_session_stack(struct format_tree *ft)
 
 	if (s == NULL)
 		return (NULL);
+	if (s->curw == NULL)
+		return (NULL);
 
 	xsnprintf(result, sizeof result, "%u", s->curw->idx);
 	TAILQ_FOREACH(wl, &s->lastw, sentry) {
@@ -770,7 +772,7 @@ format_cb_window_active_clients(struct format_tree *ft)
 		if (client_session == NULL)
 			continue;
 
-		if (w == client_session->curw->window)
+		if (client_session->curw != NULL && w == client_session->curw->window)
 			n++;
 	}
 
@@ -802,7 +804,7 @@ format_cb_window_active_clients_list(struct format_tree *ft)
 		if (client_session == NULL)
 			continue;
 
-		if (w == client_session->curw->window) {
+		if (client_session->curw != NULL && w == client_session->curw->window) {
 			if (EVBUFFER_LENGTH(buffer) > 0)
 				evbuffer_add(buffer, ",", 1);
 			evbuffer_add_printf(buffer, "%s", loop->name);
@@ -940,7 +942,8 @@ format_cb_history_all_bytes(struct format_tree *ft)
 	struct window_pane	*wp = ft->wp;
 	struct grid		*gd;
 	struct grid_line	*gl;
-	u_int			 i, lines, cells = 0, extended_cells = 0;
+	u_int			 i, lines;
+	size_t			 cells = 0, extended_cells = 0;
 	char			*value;
 
 	if (wp == NULL)
@@ -954,7 +957,7 @@ format_cb_history_all_bytes(struct format_tree *ft)
 		extended_cells += gl->extdsize;
 	}
 
-	xasprintf(&value, "%u,%zu,%u,%zu,%u,%zu", lines,
+	xasprintf(&value, "%u,%zu,%zu,%zu,%zu,%zu", lines,
 	    lines * sizeof *gl, cells, cells * sizeof *gl->celldata,
 	    extended_cells, extended_cells * sizeof *gl->extddata);
 	return (value);
@@ -1146,7 +1149,7 @@ format_cb_pane_at_bottom(struct format_tree *ft)
 
 	status = options_get_number(w->options, "pane-border-status");
 	if (status == PANE_STATUS_BOTTOM)
-		flag = (wp->yoff + wp->sy == w->sy - 1);
+		flag = (w->sy > 0 && wp->yoff + wp->sy == w->sy - 1);
 	else
 		flag = (wp->yoff + wp->sy == w->sy);
 	xasprintf(&value, "%d", flag);
@@ -2003,8 +2006,11 @@ format_cb_pane_at_right(struct format_tree *ft)
 static void *
 format_cb_pane_bottom(struct format_tree *ft)
 {
-	if (ft->wp != NULL)
+	if (ft->wp != NULL) {
+		if (ft->wp->sy == 0)
+			return (format_printf("%u", ft->wp->yoff));
 		return (format_printf("%u", ft->wp->yoff + ft->wp->sy - 1));
+	}
 	return (NULL);
 }
 
@@ -2243,8 +2249,11 @@ format_cb_pane_pipe(struct format_tree *ft)
 static void *
 format_cb_pane_right(struct format_tree *ft)
 {
-	if (ft->wp != NULL)
+	if (ft->wp != NULL) {
+		if (ft->wp->sx == 0)
+			return (format_printf("%u", ft->wp->xoff));
 		return (format_printf("%u", ft->wp->xoff + ft->wp->sx - 1));
+	}
 	return (NULL);
 }
 
@@ -2358,10 +2367,10 @@ format_cb_session_activity_flag(struct format_tree *ft)
 
 	if (ft->s != NULL) {
 		RB_FOREACH(wl, winlinks, &ft->s->windows) {
-			if (ft->wl->flags & WINLINK_ACTIVITY)
+			if (wl->flags & WINLINK_ACTIVITY)
 				return (xstrdup("1"));
-			return (xstrdup("0"));
 		}
+		return (xstrdup("0"));
 	}
 	return (NULL);
 }
@@ -2376,8 +2385,8 @@ format_cb_session_bell_flag(struct format_tree *ft)
 		RB_FOREACH(wl, winlinks, &ft->s->windows) {
 			if (wl->flags & WINLINK_BELL)
 				return (xstrdup("1"));
-			return (xstrdup("0"));
 		}
+		return (xstrdup("0"));
 	}
 	return (NULL);
 }
@@ -2390,10 +2399,10 @@ format_cb_session_silence_flag(struct format_tree *ft)
 
 	if (ft->s != NULL) {
 		RB_FOREACH(wl, winlinks, &ft->s->windows) {
-			if (ft->wl->flags & WINLINK_SILENCE)
+			if (wl->flags & WINLINK_SILENCE)
 				return (xstrdup("1"));
-			return (xstrdup("0"));
 		}
+		return (xstrdup("0"));
 	}
 	return (NULL);
 }
@@ -2564,8 +2573,11 @@ format_cb_sixel_support(__unused struct format_tree *ft)
 static void *
 format_cb_active_window_index(struct format_tree *ft)
 {
-	if (ft->s != NULL)
+	if (ft->s != NULL) {
+		if (ft->s->curw == NULL)
+			return (NULL);
 		return (format_printf("%u", ft->s->curw->idx));
+	}
 	return (NULL);
 }
 
@@ -2577,6 +2589,8 @@ format_cb_last_window_index(struct format_tree *ft)
 
 	if (ft->s != NULL) {
 		wl = RB_MAX(winlinks, &ft->s->windows);
+		if (wl == NULL)
+			return (NULL);
 		return (format_printf("%u", wl->idx));
 	}
 	return (NULL);
@@ -4019,11 +4033,12 @@ format_unescape(const char *s)
 			brackets++;
 		if (brackets == 0 &&
 		    *s == '#' &&
+		    s[1] != '\0' &&
 		    strchr(",#{}:", s[1]) != NULL) {
 			*cp++ = *++s;
 			continue;
 		}
-		if (*s == '}')
+		if (*s == '}' && brackets > 0)
 			brackets--;
 		*cp++ = *s;
 	}
@@ -4042,12 +4057,13 @@ format_strip(const char *s)
 	for (; *s != '\0'; s++) {
 		if (*s == '#' && s[1] == '{')
 			brackets++;
-		if (*s == '#' && strchr(",#{}:", s[1]) != NULL) {
+		if (*s == '#' && s[1] != '\0' &&
+		    strchr(",#{}:", s[1]) != NULL) {
 			if (brackets != 0)
 				*cp++ = *s;
 			continue;
 		}
-		if (*s == '}')
+		if (*s == '}' && brackets > 0)
 			brackets--;
 		*cp++ = *s;
 	}
@@ -4070,7 +4086,7 @@ format_skip(const char *s, const char *end)
 			s++;
 			continue;
 		}
-		if (*s == '}')
+		if (*s == '}' && brackets > 0)
 			brackets--;
 		if (strchr(end, *s) != NULL && brackets == 0)
 			break;
@@ -4128,6 +4144,9 @@ format_add_modifier(struct format_modifier **list, u_int *count,
     const char *c, size_t n, char **argv, int argc)
 {
 	struct format_modifier *fm;
+
+	if (n > 2)
+		return;
 
 	*list = xreallocarray(*list, (*count) + 1, sizeof **list);
 	fm = &(*list)[(*count)++];
@@ -4188,7 +4207,8 @@ format_build_modifiers(struct format_expand_state *es, const char **s,
 		}
 
 		/* Then try double character with no arguments. */
-		if ((memcmp("||", cp, 2) == 0 ||
+		if (cp[1] != '\0' &&
+		    (memcmp("||", cp, 2) == 0 ||
 		    memcmp("&&", cp, 2) == 0 ||
 		    memcmp("!!", cp, 2) == 0 ||
 		    memcmp("!=", cp, 2) == 0 ||
@@ -4427,6 +4447,7 @@ format_loop_sessions(struct format_expand_state *es, const char *fmt)
 		format_log(es, "session loop: $%u", s->id);
 		if (active != NULL &&
 		    ft->c != NULL &&
+		    ft->c->session != NULL &&
 		    s->id == ft->c->session->id)
 			use = active;
 		else
@@ -4446,6 +4467,10 @@ format_loop_sessions(struct format_expand_state *es, const char *fmt)
 		strlcat(value, expanded, valuelen);
 		free(expanded);
 	}
+/* l is static, do not free */
+
+	free(active);
+	free(all);
 
 	return (value);
 }
@@ -4528,6 +4553,7 @@ format_loop_windows(struct format_expand_state *es, const char *fmt)
 		strlcat(value, expanded, valuelen);
 		free(expanded);
 	}
+/* l is static, do not free */
 
 	free(active);
 	free(all);
@@ -4587,6 +4613,7 @@ format_loop_panes(struct format_expand_state *es, const char *fmt)
 		strlcat(value, expanded, valuelen);
 		free(expanded);
 	}
+/* l is static, do not free */
 
 	free(active);
 	free(all);
@@ -4630,6 +4657,7 @@ format_loop_clients(struct format_expand_state *es, const char *fmt)
 		strlcat(value, expanded, valuelen);
 		free(expanded);
 	}
+/* l is static, do not free */
 
 	return (value);
 }
@@ -4693,7 +4721,7 @@ format_replace_expression(struct format_modifier *mexp,
 
 	/* The third argument may be precision. */
 	if (argc >= 3) {
-		prec = strtonum(mexp->argv[2], INT_MIN, INT_MAX, &errstr);
+		prec = strtonum(mexp->argv[2], 0, 100, &errstr);
 		if (errstr != NULL) {
 			format_log(es, "expression precision %s: %s", errstr,
 			    mexp->argv[2]);
@@ -4719,6 +4747,10 @@ format_replace_expression(struct format_modifier *mexp,
 	}
 
 	if (!use_fp) {
+		if (!isfinite(mleft) || !isfinite(mright)) {
+			format_log(es, "expression operand is not finite");
+			goto fail;
+		}
 		mleft = (long long)mleft;
 		mright = (long long)mright;
 	}
@@ -4736,9 +4768,17 @@ format_replace_expression(struct format_modifier *mexp,
 		result = mleft * mright;
 		break;
 	case DIVIDE:
+		if (mright == 0) {
+			format_log(es, "expression division by zero");
+			goto fail;
+		}
 		result = mleft / mright;
 		break;
 	case MODULUS:
+		if (mright == 0) {
+			format_log(es, "expression modulus by zero");
+			goto fail;
+		}
 		result = fmod(mleft, mright);
 		break;
 	case EQUAL:
@@ -4838,7 +4878,7 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 			case '=':
 				if (fm->argc < 1)
 					break;
-				limit = strtonum(fm->argv[0], INT_MIN, INT_MAX,
+				limit = strtonum(fm->argv[0], INT_MIN + 1, INT_MAX,
 				    &errstr);
 				if (errstr != NULL)
 					limit = 0;
@@ -4848,7 +4888,7 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 			case 'p':
 				if (fm->argc < 1)
 					break;
-				width = strtonum(fm->argv[0], INT_MIN, INT_MAX,
+				width = strtonum(fm->argv[0], INT_MIN + 1, INT_MAX,
 				    &errstr);
 				if (errstr != NULL)
 					width = 0;
@@ -5269,6 +5309,7 @@ done:
 		if (marker != NULL && strcmp(new, value) != 0) {
 			free(value);
 			xasprintf(&value, "%s%s", new, marker);
+			free(new);
 		} else {
 			free(value);
 			value = new;
@@ -5279,6 +5320,7 @@ done:
 		if (marker != NULL && strcmp(new, value) != 0) {
 			free(value);
 			xasprintf(&value, "%s%s", marker, new);
+			free(new);
 		} else {
 			free(value);
 			value = new;
@@ -5371,11 +5413,13 @@ format_expand1(struct format_expand_state *es, const char *fmt)
 		if (format_strftime(expanded, sizeof expanded, fmt,
 		    &es->tm) == 0) {
 			format_log(es, "format is too long");
+			es->loop--;
 			return (xstrdup(""));
 		}
 		if (format_logging(ft) && strcmp(expanded, fmt) != 0)
 			format_log(es, "after time expanded: %s", expanded);
 		fmt = expanded;
+		style_end = NULL;
 	}
 
 	len = 64;
@@ -5391,7 +5435,8 @@ format_expand1(struct format_expand_state *es, const char *fmt)
 			buf[off++] = *fmt++;
 			continue;
 		}
-		if (*fmt++ == '\0')
+		fmt++;
+		if (*fmt == '\0')
 			break;
 
 		ch = (u_char)*fmt++;

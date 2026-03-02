@@ -102,7 +102,9 @@ screen_write_set_cursor(struct screen_write_ctx *ctx, int cx, int cy)
 		s->cx = cx;
 	}
 	if (cy != -1) {
-		if ((u_int)cy > screen_size_y(s) - 1)
+		if (screen_size_y(s) == 0)
+			cy = 0;
+		else if ((u_int)cy > screen_size_y(s) - 1)
 			cy = screen_size_y(s) - 1;
 		s->cy = cy;
 	}
@@ -133,13 +135,16 @@ screen_write_set_client_cb(struct tty_ctx *ttyctx, struct client *c)
 {
 	struct window_pane	*wp = ttyctx->arg;
 
+	if (c->session == NULL)
+		return (0);
+
 	if (ttyctx->allow_invisible_panes) {
 		if (session_has(c->session, wp->window))
 			return (1);
 		return (0);
 	}
 
-	if (c->session->curw->window != wp->window)
+	if (c->session->curw == NULL || c->session->curw->window != wp->window)
 		return (0);
 	if (wp->layout_cell == NULL)
 		return (0);
@@ -242,9 +247,14 @@ screen_write_free_list(struct screen *s)
 {
 	u_int	y;
 
-	for (y = 0; y < screen_size_y(s); y++)
+	for (y = 0; y < screen_size_y(s); y++) {
+		TAILQ_CONCAT(&screen_write_citem_freelist,
+		    &s->write_list[y].items, entry);
 		free(s->write_list[y].data);
+		s->write_list[y].data = NULL;
+	}
 	free(s->write_list);
+	s->write_list = NULL;
 }
 
 /* Set up for writing. */
@@ -332,6 +342,11 @@ screen_write_reset(struct screen_write_ctx *ctx)
 	if (options_get_number(global_options, "extended-keys") == 2)
 		s->mode = (s->mode & ~EXTENDED_KEY_MODES)|MODE_KEYS_EXTENDED;
 
+	memset(s->kitty_kbd.flags, 0, sizeof(s->kitty_kbd.flags));
+	s->kitty_kbd.idx = 0;
+	if (options_get_number(global_options, "kitty-keys") == 2)
+		s->kitty_kbd.flags[0] = KITTY_KBD_DISAMBIGUATE;
+
 	screen_write_clearscreen(ctx, 8);
 	screen_write_set_cursor(ctx, 0, 0);
 }
@@ -410,6 +425,14 @@ screen_write_text(struct screen_write_ctx *ctx, u_int cx, u_int width,
 	text = utf8_fromcstr(tmp);
 	free(tmp);
 
+	if (s->cx > cx + width) {
+		free(text);
+		return (0);
+	}
+	if (lines == 0) {
+		free(text);
+		return (0);
+	}
 	left = (cx + width) - s->cx;
 	for (;;) {
 		/* Find the end of what can fit on the line. */
@@ -651,6 +674,9 @@ screen_write_hline(struct screen_write_ctx *ctx, u_int nx, int left, int right,
 	struct grid_cell	 gc;
 	u_int			 cx, cy, i;
 
+	if (nx < 2)
+		return;
+
 	cx = s->cx;
 	cy = s->cy;
 
@@ -686,6 +712,9 @@ screen_write_vline(struct screen_write_ctx *ctx, u_int ny, int top, int bottom)
 	struct screen		*s = ctx->s;
 	struct grid_cell	 gc;
 	u_int			 cx, cy, i;
+
+	if (ny < 2)
+		return;
 
 	cx = s->cx;
 	cy = s->cy;
@@ -763,6 +792,9 @@ screen_write_box(struct screen_write_ctx *ctx, u_int nx, u_int ny,
 	struct screen		*s = ctx->s;
 	struct grid_cell         gc;
 	u_int			 cx, cy, i;
+
+	if (nx < 4 || ny < 2)
+		return;
 
 	cx = s->cx;
 	cy = s->cy;
@@ -1613,7 +1645,7 @@ screen_write_clearstartofscreen(struct screen_write_ctx *ctx, u_int bg)
 	u_int		 sx = screen_size_x(s);
 
 #ifdef ENABLE_SIXEL
-	if (image_check_line(s, 0, s->cy - 1) && ctx->wp != NULL)
+	if (s->cy > 0 && image_check_line(s, 0, s->cy) && ctx->wp != NULL)
 		ctx->wp->flags |= PANE_REDRAW;
 #endif
 
@@ -1715,10 +1747,10 @@ screen_write_collect_trim(struct screen_write_ctx *ctx, u_int y, u_int x,
 		if (csx >= sx && cex <= ex) {
 			log_debug("%s: %p %u-%u inside %u-%u", __func__, ci,
 			    csx, cex, sx, ex);
-			TAILQ_REMOVE(&cl->items, ci, entry);
-			screen_write_free_citem(ci);
 			if (csx == 0 && ci->wrapped && wrapped != NULL)
 				*wrapped = 1;
+			TAILQ_REMOVE(&cl->items, ci, entry);
+			screen_write_free_citem(ci);
 			continue;
 		}
 
@@ -1879,8 +1911,8 @@ screen_write_collect_flush(struct screen_write_ctx *ctx, int scroll_only,
 			items++;
 
 			TAILQ_REMOVE(&cl->items, ci, entry);
-			screen_write_free_citem(ci);
 			last = ci->x;
+			screen_write_free_citem(ci);
 		}
 	}
 	s->cx = cx; s->cy = cy;

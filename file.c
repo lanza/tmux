@@ -33,7 +33,7 @@
  * are for use either in client or server but not both.
  */
 
-static int	file_next_stream = 3;
+static u_int	file_next_stream = 3;
 
 RB_GENERATE(client_files, client_file, entry, file_cmp);
 
@@ -556,6 +556,7 @@ file_write_callback(__unused struct bufferevent *bev, void *arg)
 		bufferevent_free(cf->event);
 		close(cf->fd);
 		RB_REMOVE(client_files, cf->tree, cf);
+		cf->tree = NULL;
 		file_free(cf);
 	}
 }
@@ -578,8 +579,11 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		fatalx("bad MSG_WRITE_OPEN size");
 	if (msglen == sizeof *msg)
 		path = "-";
-	else
+	else {
 		path = (const char *)(msg + 1);
+		if (((const char *)imsg->data)[msglen - 1] != '\0')
+			fatalx("bad MSG_WRITE_OPEN path");
+	}
 	log_debug("open write file %d %s", msg->stream, path);
 
 	find.stream = msg->stream;
@@ -590,6 +594,7 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 	cf = file_create_with_peer(peer, files, msg->stream, cb, cbdata);
 	if (cf->closed) {
 		error = EBADF;
+		file_free(cf);
 		goto reply;
 	}
 
@@ -608,6 +613,7 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 	      errno = EBADF;
 	if (cf->fd == -1) {
 		error = errno;
+		file_free(cf);
 		goto reply;
 	}
 
@@ -631,10 +637,11 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 	struct msg_write_data	*msg = imsg->data;
 	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	struct client_file	 find, *cf;
-	size_t			 size = msglen - sizeof *msg;
+	size_t			 size;
 
 	if (msglen < sizeof *msg)
 		fatalx("bad MSG_WRITE size");
+	size = msglen - sizeof *msg;
 	find.stream = msg->stream;
 	if ((cf = RB_FIND(client_files, files, &find)) == NULL)
 		fatalx("unknown stream number");
@@ -665,6 +672,7 @@ file_write_close(struct client_files *files, struct imsg *imsg)
 		if (cf->fd != -1)
 			close(cf->fd);
 		RB_REMOVE(client_files, files, cf);
+		cf->tree = NULL;
 		file_free(cf);
 	}
 }
@@ -686,6 +694,7 @@ file_read_error_callback(__unused struct bufferevent *bev, __unused short what,
 	bufferevent_free(cf->event);
 	close(cf->fd);
 	RB_REMOVE(client_files, cf->tree, cf);
+	cf->tree = NULL;
 	file_free(cf);
 }
 
@@ -739,8 +748,11 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 		fatalx("bad MSG_READ_OPEN size");
 	if (msglen == sizeof *msg)
 		path = "-";
-	else
+	else {
 		path = (const char *)(msg + 1);
+		if (((const char *)imsg->data)[msglen - 1] != '\0')
+			fatalx("bad MSG_READ_OPEN path");
+	}
 	log_debug("open read file %d %s", msg->stream, path);
 
 	find.stream = msg->stream;
@@ -751,6 +763,7 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 	cf = file_create_with_peer(peer, files, msg->stream, cb, cbdata);
 	if (cf->closed) {
 		error = EBADF;
+		file_free(cf);
 		goto reply;
 	}
 
@@ -769,6 +782,7 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 		errno = EBADF;
 	if (cf->fd == -1) {
 		error = errno;
+		file_free(cf);
 		goto reply;
 	}
 
@@ -831,10 +845,11 @@ file_read_data(struct client_files *files, struct imsg *imsg)
 	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	struct client_file	 find, *cf;
 	void			*bdata = msg + 1;
-	size_t			 bsize = msglen - sizeof *msg;
+	size_t			 bsize;
 
 	if (msglen < sizeof *msg)
 		fatalx("bad MSG_READ_DATA size");
+	bsize = msglen - sizeof *msg;
 	find.stream = msg->stream;
 	if ((cf = RB_FIND(client_files, files, &find)) == NULL)
 		return;

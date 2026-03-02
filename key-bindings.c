@@ -140,7 +140,7 @@ key_bindings_unref_table(struct key_table *table)
 	struct key_binding	*bd;
 	struct key_binding	*bd1;
 
-	if (--table->references != 0)
+	if (table->references == 0 || --table->references != 0)
 		return;
 
 	RB_FOREACH_SAFE(bd, key_bindings, &table->key_bindings, bd1) {
@@ -252,7 +252,13 @@ key_bindings_remove(const char *name, key_code key)
 
 	if (RB_EMPTY(&table->key_bindings) &&
 	    RB_EMPTY(&table->default_key_bindings)) {
+		struct client	*c;
+
 		RB_REMOVE(key_tables, &key_tables, table);
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->keytable == table)
+				server_client_set_key_table(c, NULL);
+		}
 		key_bindings_unref_table(table);
 	}
 }

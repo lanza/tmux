@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -172,6 +173,8 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 					fatal("dup2 failed");
 				if (nullfd != STDERR_FILENO)
 					close(nullfd);
+				do_close = do_close &&
+				    out[1] != STDERR_FILENO;
 			}
 			if (do_close)
 				close(out[1]);
@@ -301,7 +304,7 @@ job_resize(struct job *job, u_int sx, u_int sy)
 	ws.ws_col = sx;
 	ws.ws_row = sy;
 	if (ioctl(job->fd, TIOCSWINSZ, &ws) == -1)
-		fatal("ioctl failed");
+		log_debug("ioctl TIOCSWINSZ failed: %s", strerror(errno));
 }
 
 /* Job buffer read callback. */

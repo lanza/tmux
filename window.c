@@ -80,19 +80,31 @@ RB_GENERATE(window_pane_tree, window_pane, tree_entry, window_pane_cmp);
 int
 window_cmp(struct window *w1, struct window *w2)
 {
-	return (w1->id - w2->id);
+	if (w1->id < w2->id)
+		return (-1);
+	if (w1->id > w2->id)
+		return (1);
+	return (0);
 }
 
 int
 winlink_cmp(struct winlink *wl1, struct winlink *wl2)
 {
-	return (wl1->idx - wl2->idx);
+	if (wl1->idx < wl2->idx)
+		return (-1);
+	if (wl1->idx > wl2->idx)
+		return (1);
+	return (0);
 }
 
 int
 window_pane_cmp(struct window_pane *wp1, struct window_pane *wp2)
 {
-	return (wp1->id - wp2->id);
+	if (wp1->id < wp2->id)
+		return (-1);
+	if (wp1->id > wp2->id)
+		return (1);
+	return (0);
 }
 
 struct winlink *
@@ -126,7 +138,7 @@ winlink_find_by_window_id(struct winlinks *wwl, u_int id)
 	struct winlink *wl;
 
 	RB_FOREACH(wl, winlinks, wwl) {
-		if (wl->window->id == id)
+		if (wl->window != NULL && wl->window->id == id)
 			return (wl);
 	}
 	return (NULL);
@@ -494,6 +506,7 @@ window_pane_update_focus(struct window_pane *wp)
 				if (c->session != NULL &&
 				    c->session->attached != 0 &&
 				    (c->flags & CLIENT_FOCUSED) &&
+				    c->session->curw != NULL &&
 				    c->session->curw->window == wp->window &&
 				    c->overlay_draw == NULL) {
 					focused = 1;
@@ -614,8 +627,12 @@ window_get_active_at(struct window *w, u_int x, u_int y)
 struct window_pane *
 window_find_string(struct window *w, const char *s)
 {
-	u_int	x, y, top = 0, bottom = w->sy - 1;
+	u_int	x, y, top = 0, bottom;
 	int	status;
+
+	if (w->sx == 0 || w->sy == 0)
+		return (NULL);
+	bottom = w->sy - 1;
 
 	x = w->sx / 2;
 	y = w->sy / 2;
@@ -623,7 +640,7 @@ window_find_string(struct window *w, const char *s)
 	status = options_get_number(w->options, "pane-border-status");
 	if (status == PANE_STATUS_TOP)
 		top++;
-	else if (status == PANE_STATUS_BOTTOM)
+	else if (status == PANE_STATUS_BOTTOM && bottom > 0)
 		bottom--;
 
 	if (strcasecmp(s, "top") == 0)
@@ -722,7 +739,7 @@ window_pop_zoom(struct window *w)
 {
 	log_debug("%s: @%u %d", __func__, w->id,
 	    !!(w->flags & WINDOW_WASZOOMED));
-	if (w->flags & WINDOW_WASZOOMED)
+	if (w->flags & WINDOW_WASZOOMED && w->active != NULL)
 		return (window_zoom(w->active) == 0);
 	return (0);
 }
@@ -891,9 +908,9 @@ window_printable_flags(struct winlink *wl, int escape)
 		flags[pos++] = '!';
 	if (wl->flags & WINLINK_SILENCE)
 		flags[pos++] = '~';
-	if (wl == s->curw)
+	if (s != NULL && wl == s->curw)
 		flags[pos++] = '*';
-	if (wl == TAILQ_FIRST(&s->lastw))
+	if (s != NULL && wl == TAILQ_FIRST(&s->lastw))
 		flags[pos++] = '-';
 	if (server_check_marked() && wl == marked_pane.wl)
 		flags[pos++] = 'M';
@@ -1137,8 +1154,8 @@ window_pane_set_mode(struct window_pane *wp, struct window_pane *swp,
 	wp->flags |= (PANE_REDRAW|PANE_REDRAWSCROLLBAR|PANE_CHANGED);
 	layout_fix_panes(w, NULL);
 
-	server_redraw_window_borders(wp->window);
-	server_status_window(wp->window);
+	server_redraw_window_borders(w);
+	server_status_window(w);
 	notify_pane("pane-mode-changed", wp);
 
 	return (0);
@@ -1173,8 +1190,8 @@ window_pane_reset_mode(struct window_pane *wp)
 	wp->flags |= (PANE_REDRAW|PANE_REDRAWSCROLLBAR|PANE_CHANGED);
 	layout_fix_panes(w, NULL);
 
-	server_redraw_window_borders(wp->window);
-	server_status_window(wp->window);
+	server_redraw_window_borders(w);
+	server_status_window(w);
 	notify_pane("pane-mode-changed", wp);
 }
 
@@ -1249,8 +1266,10 @@ window_pane_key(struct window_pane *wp, struct client *c, struct session *s,
 
 	wme = TAILQ_FIRST(&wp->modes);
 	if (wme != NULL) {
+		if (key & KEYC_RELEASE)
+			return (0);
 		if (wme->mode->key != NULL && c != NULL) {
-			key &= ~KEYC_MASK_FLAGS;
+			key &= ~(KEYC_MASK_FLAGS|KEYC_CAPS_LOCK);
 			wme->mode->key(wme, c, s, wl, key, m);
 		}
 		return (0);
@@ -1370,7 +1389,10 @@ window_pane_full_size_offset(struct window_pane *wp, u_int *xoff, u_int *yoff,
 	else
 		sb_w = 0;
 	if (sb_pos == PANE_SCROLLBARS_LEFT) {
-		*xoff = wp->xoff - sb_w;
+		if (sb_w > wp->xoff)
+			*xoff = 0;
+		else
+			*xoff = wp->xoff - sb_w;
 		*sx = wp->sx + sb_w;
 	} else { /* sb_pos == PANE_SCROLLBARS_RIGHT */
 		*xoff = wp->xoff;
@@ -1476,8 +1498,8 @@ window_pane_find_down(struct window_pane *wp)
 			edge = 0;
 	}
 
-	left = wp->xoff;
-	right = wp->xoff + wp->sx;
+	left = xoff;
+	right = xoff + sx;
 
 	TAILQ_FOREACH(next, &w->panes, entry) {
 		window_pane_full_size_offset(next, &xoff, &yoff, &sx, &sy);
@@ -1580,8 +1602,8 @@ window_pane_find_right(struct window_pane *wp)
 	if (edge >= w->sx)
 		edge = 0;
 
-	top = wp->yoff;
-	bottom = wp->yoff + wp->sy;
+	top = yoff;
+	bottom = yoff + sy;
 
 	TAILQ_FOREACH(next, &w->panes, entry) {
 		window_pane_full_size_offset(next, &xoff, &yoff, &sx, &sy);
@@ -1691,6 +1713,7 @@ window_pane_input_callback(struct client *c, __unused const char *path,
 			c->flags |= CLIENT_EXIT;
 		}
 		file_cancel(cdata->file);
+		cdata->file = NULL;
 	} else if (cdata->file == NULL || closed || error != 0) {
 		cmdq_continue(cdata->item);
 		server_client_unref(c);

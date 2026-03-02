@@ -173,11 +173,17 @@ window_client_draw(__unused void *modedata, void *itemdata,
 
 	if (c->session == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
 		return;
+	if (c->session->curw == NULL)
+		return;
 	wp = c->session->curw->window->active;
+	if (wp == NULL)
+		return;
 
 	lines = status_line_size(c);
 	if (lines >= sy)
 		lines = 0;
+	if (sy < 3)
+		return;
 	if (status_at_line(c) == 0)
 		at = lines;
 	else
@@ -323,8 +329,9 @@ window_client_do_detach(void *modedata, void *itemdata,
 	struct window_client_modedata	*data = modedata;
 	struct window_client_itemdata	*item = itemdata;
 
-	if (item == mode_tree_get_current(data->data))
-		mode_tree_down(data->data, 0);
+	if (item == mode_tree_get_current(data->data) &&
+	    !mode_tree_down(data->data, 0))
+		mode_tree_up(data->data, 0);
 	if (key == 'd' || key == 'D')
 		server_client_detach(item->c, MSG_DETACH);
 	else if (key == 'x' || key == 'X')
@@ -350,6 +357,8 @@ window_client_key(struct window_mode_entry *wme, struct client *c,
 	case 'x':
 	case 'z':
 		item = mode_tree_get_current(mtd);
+		if (item == NULL)
+			break;
 		window_client_do_detach(data, item, c, key);
 		mode_tree_build(mtd);
 		break;
@@ -361,6 +370,8 @@ window_client_key(struct window_mode_entry *wme, struct client *c,
 		break;
 	case '\r':
 		item = mode_tree_get_current(mtd);
+		if (item == NULL)
+			break;
 		mode_tree_run_command(c, NULL, data->command, item->c->ttyname);
 		finished = 1;
 		break;

@@ -130,7 +130,8 @@ format_draw_put_list(struct screen_write_ctx *octx,
 
 	/* If there is enough space for the list, draw it entirely. */
 	if (width >= list->cx) {
-		format_draw_put(octx, ocx, ocy, list, frs, offset, 0, width);
+		format_draw_put(octx, ocx, ocy, list, frs, offset, 0,
+		    list->cx);
 		return;
 	}
 
@@ -396,7 +397,8 @@ format_draw_centre(struct screen_write_ctx *octx, u_int available, u_int ocx,
 	 *     middle - width_list / 2 - width_centre.
 	 */
 	format_draw_put(octx, ocx, ocy, centre, frs,
-	    middle - width_list / 2 - width_centre,
+	    middle > width_list / 2 + width_centre ?
+	    middle - width_list / 2 - width_centre : 0,
 	    0,
 	    width_centre);
 
@@ -405,7 +407,8 @@ format_draw_centre(struct screen_write_ctx *octx, u_int available, u_int ocx,
 	 *     middle - width_list / 2 + width_list
 	 */
 	format_draw_put(octx, ocx, ocy, after, frs,
-	    middle - width_list / 2 + width_list,
+	    middle > width_list / 2 ?
+	    middle - width_list / 2 + width_list : width_list,
 	    0,
 	    width_after);
 
@@ -605,7 +608,7 @@ format_draw_absolute_centre(struct screen_write_ctx *octx, u_int available,
 	 *     middle - width_centre.
 	 */
 	format_draw_put(octx, ocx, ocy, centre, frs,
-		middle - width_centre,
+		middle >= width_centre ? middle - width_centre : 0,
 		0,
 		width_centre);
 
@@ -817,8 +820,11 @@ format_draw(struct screen_write_ctx *octx, const struct grid_cell *base,
 		if (end == NULL) {
 			log_debug("%s: no terminating ] at '%s'", __func__,
 			    cp + 2);
+			free(fr);
 			TAILQ_FOREACH_SAFE(fr, &frs, entry, fr1)
 			    format_free_range(&frs, fr);
+			for (i = 0; i < TOTAL; i++)
+				screen_write_stop(&ctx[i]);
 			goto out;
 		}
 		tmp = xstrndup(cp + 2, end - (cp + 2));

@@ -119,8 +119,14 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 	log_debug("socket is %s", path);
 
 retry:
-	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
+	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+		if (locked) {
+			free(lockfile);
+			if (lockfd >= 0)
+				close(lockfd);
+		}
 		return (-1);
+	}
 
 	log_debug("trying connect");
 	if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == -1) {
@@ -174,7 +180,8 @@ retry:
 failed:
 	if (locked) {
 		free(lockfile);
-		close(lockfd);
+		if (lockfd >= 0)
+			close(lockfd);
 	}
 	close(fd);
 	return (-1);
@@ -345,6 +352,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (tcgetattr(STDIN_FILENO, &saved_tio) != 0) {
 			fprintf(stderr, "tcgetattr failed: %s\n",
 			    strerror(errno));
+			tty_term_free_list(caps, ncaps);
 			return (1);
 		}
 		cfmakeraw(&tio);
@@ -458,8 +466,6 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	u_int	  i;
 
 	proc_send(client_peer, MSG_IDENTIFY_LONGFLAGS, -1, &flags, sizeof flags);
-	proc_send(client_peer, MSG_IDENTIFY_LONGFLAGS, -1, &client_flags,
-	    sizeof client_flags);
 
 	proc_send(client_peer, MSG_IDENTIFY_TERM, -1, termname,
 	    strlen(termname) + 1);
@@ -476,10 +482,12 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 
 	if ((fd = dup(STDIN_FILENO)) == -1)
 		fatal("dup failed");
-	proc_send(client_peer, MSG_IDENTIFY_STDIN, fd, NULL, 0);
+	if (proc_send(client_peer, MSG_IDENTIFY_STDIN, fd, NULL, 0) != 0)
+		close(fd);
 	if ((fd = dup(STDOUT_FILENO)) == -1)
 		fatal("dup failed");
-	proc_send(client_peer, MSG_IDENTIFY_STDOUT, fd, NULL, 0);
+	if (proc_send(client_peer, MSG_IDENTIFY_STDOUT, fd, NULL, 0) != 0)
+		close(fd);
 
 	pid = getpid();
 	proc_send(client_peer, MSG_IDENTIFY_CLIENTPID, -1, &pid, sizeof pid);
@@ -616,6 +624,7 @@ client_dispatch_exit_message(char *data, size_t datalen)
 		datalen -= sizeof retval;
 		data += sizeof retval;
 
+		free(client_exitmessage);
 		client_exitmessage = xmalloc(datalen);
 		memcpy(client_exitmessage, data, datalen);
 		client_exitmessage[datalen - 1] = '\0';
@@ -747,6 +756,7 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			fatalx("bad MSG_DETACH string");
 
+		free((void *)client_exitsession);
 		client_exitsession = xstrdup(data);
 		client_exittype = imsg->hdr.type;
 		if (imsg->hdr.type == MSG_DETACHKILL)
@@ -759,6 +769,8 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen == 0 || data[datalen - 1] != '\0' ||
 		    strlen(data) + 1 == (size_t)datalen)
 			fatalx("bad MSG_EXEC string");
+		free((void *)client_execcmd);
+		free((void *)client_execshell);
 		client_execcmd = xstrdup(data);
 		client_execshell = xstrdup(data + strlen(data) + 1);
 

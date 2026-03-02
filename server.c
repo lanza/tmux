@@ -67,11 +67,12 @@ static void	server_child_stopped(pid_t, int);
 void
 server_set_marked(struct session *s, struct winlink *wl, struct window_pane *wp)
 {
+	if (s == NULL || wl == NULL || wp == NULL)
+		return;
 	cmd_find_clear_state(&marked_pane, 0);
 	marked_pane.s = s;
 	marked_pane.wl = wl;
-	if (wl != NULL)
-		marked_pane.w = wl->window;
+	marked_pane.w = wl->window;
 	marked_pane.wp = wp;
 }
 
@@ -130,6 +131,7 @@ server_create_socket(uint64_t flags, char **cause)
 	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) == -1) {
 		saved_errno = errno;
 		close(fd);
+		umask(mask);
 		errno = saved_errno;
 		goto fail;
 	}
@@ -443,7 +445,8 @@ server_signal(int sig)
 		server_child_signal();
 		break;
 	case SIGUSR1:
-		event_del(&server_ev_accept);
+		if (event_initialized(&server_ev_accept))
+			event_del(&server_ev_accept);
 		fd = server_create_socket(server_client_flags, NULL);
 		if (fd != -1) {
 			close(server_fd);
@@ -499,10 +502,11 @@ server_child_exited(pid_t pid, int status)
 
 				if (window_pane_destroy_ready(wp))
 					server_destroy_pane(wp, 1);
-				break;
+				goto done;
 			}
 		}
 	}
+done:
 	job_check_died(pid, status);
 }
 

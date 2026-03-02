@@ -92,7 +92,7 @@ cmd_display_panes_draw_pane(struct screen_redraw_ctx *ctx,
 	} else {
 		/* Right not visible. */
 		xoff = wp->xoff - ctx->ox;
-		sx = wp->sx - xoff;
+		sx = ctx->sx - xoff;
 	}
 	if (wp->yoff >= ctx->oy && wp->yoff + wp->sy <= ctx->oy + ctx->sy) {
 		/* All visible. */
@@ -110,7 +110,7 @@ cmd_display_panes_draw_pane(struct screen_redraw_ctx *ctx,
 	} else {
 		/* Bottom not visible. */
 		yoff = wp->yoff - ctx->oy;
-		sy = wp->sy - yoff;
+		sy = ctx->sy - yoff;
 	}
 
 	if (ctx->statustop)
@@ -146,9 +146,10 @@ cmd_display_panes_draw_pane(struct screen_redraw_ctx *ctx,
 	if (sx < len * 6 || sy < 5) {
 		tty_attributes(tty, &fgc, &grid_default_cell, NULL, NULL);
 		if (sx >= len + llen + 1) {
+			u_int olen = len;
 			len += llen + 1;
 			tty_cursor(tty, xoff + px - len / 2, yoff + py);
-			tty_putn(tty, buf, len,	 len);
+			tty_putn(tty, buf, olen, olen);
 			tty_putn(tty, " ", 1, 1);
 			tty_putn(tty, lbuf, llen, llen);
 		} else {
@@ -198,8 +199,12 @@ static void
 cmd_display_panes_draw(struct client *c, __unused void *data,
     struct screen_redraw_ctx *ctx)
 {
-	struct window		*w = c->session->curw->window;
+	struct window		*w;
 	struct window_pane	*wp;
+
+	if (c->session == NULL || c->session->curw == NULL)
+		return;
+	w = c->session->curw->window;
 
 	log_debug("%s: %s @%u", __func__, c->name, w->id);
 
@@ -227,15 +232,20 @@ cmd_display_panes_key(struct client *c, void *data, struct key_event *event)
 	char				*expanded, *error;
 	struct cmdq_item		*item = cdata->item, *new_item;
 	struct cmd_list			*cmdlist;
-	struct window			*w = c->session->curw->window;
+	struct window			*w;
 	struct window_pane		*wp;
 	u_int				 index;
 	key_code			 key;
 
-	if (event->key >= '0' && event->key <= '9')
-		index = event->key - '0';
-	else if ((event->key & KEYC_MASK_MODIFIERS) == 0) {
-		key = (event->key & KEYC_MASK_KEY);
+	if (c->session == NULL || c->session->curw == NULL)
+		return (-1);
+	w = c->session->curw->window;
+
+	key = event->key & ~KEYC_CAPS_LOCK;
+	if (key >= '0' && key <= '9')
+		index = key - '0';
+	else if ((key & KEYC_MASK_MODIFIERS) == 0) {
+		key = (key & KEYC_MASK_KEY);
 		if (key >= 'a' && key <= 'z')
 			index = 10 + (key - 'a');
 		else

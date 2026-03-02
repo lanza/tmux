@@ -135,8 +135,11 @@ options_value_to_string(struct options_entry *o, union options_value *ov,
 {
 	char	*s;
 
-	if (OPTIONS_IS_COMMAND(o))
+	if (OPTIONS_IS_COMMAND(o)) {
+		if (ov->cmdlist == NULL)
+			return (xstrdup(""));
 		return (cmd_list_print(ov->cmdlist, 0));
+	}
 	if (OPTIONS_IS_NUMBER(o)) {
 		switch (o->tableentry->type) {
 		case OPTIONS_TABLE_NUMBER:
@@ -209,7 +212,7 @@ options_first(struct options *oo)
 struct options_entry *
 options_next(struct options_entry *o)
 {
-	return (RB_NEXT(options_tree, &oo->tree, o));
+	return (RB_NEXT(options_tree, &o->owner->tree, o));
 }
 
 struct options_entry *
@@ -267,7 +270,8 @@ options_default(struct options *oo, const struct options_table_entry *oe)
 
 	if (oe->flags & OPTIONS_TABLE_IS_ARRAY) {
 		if (oe->default_arr == NULL) {
-			options_array_assign(o, oe->default_str, NULL);
+			if (oe->default_str != NULL)
+				options_array_assign(o, oe->default_str, NULL);
 			return (o);
 		}
 		for (i = 0; oe->default_arr[i] != NULL; i++)
@@ -490,7 +494,8 @@ options_array_set(struct options_entry *o, u_int idx, const char *value,
 
 	if (o->tableentry->type == OPTIONS_TABLE_COLOUR) {
 		if ((number = colour_fromstring(value)) == -1) {
-			xasprintf(cause, "bad colour: %s", value);
+			if (cause != NULL)
+				xasprintf(cause, "bad colour: %s", value);
 			return (-1);
 		}
 		a = options_array_item(o, idx);
@@ -559,7 +564,7 @@ options_array_first(struct options_entry *o)
 struct options_array_item *
 options_array_next(struct options_array_item *a)
 {
-	return (RB_NEXT(options_array, &o->value.array, a));
+	return (RB_NEXT(options_array, NULL, a));
 }
 
 u_int
@@ -790,8 +795,10 @@ options_set_string(struct options *oo, const char *name, int append,
 		o = options_add(oo, name);
 	else if (o == NULL) {
 		o = options_default(oo, options_parent_table_entry(oo, name));
-		if (o == NULL)
+		if (o == NULL) {
+			free(value);
 			return (NULL);
+		}
 	}
 
 	if (!OPTIONS_IS_STRING(o))
@@ -997,12 +1004,15 @@ options_string_to_style(struct options *oo, const char *name,
 		expanded = format_expand(ft, s);
 		if (style_parse(&o->style, &grid_default_cell, expanded) != 0) {
 			free(expanded);
+			o->cached = 0;
 			return (NULL);
 		}
 		free(expanded);
 	} else {
-		if (style_parse(&o->style, &grid_default_cell, s) != 0)
+		if (style_parse(&o->style, &grid_default_cell, s) != 0) {
+			o->cached = 0;
 			return (NULL);
+		}
 	}
 	return (&o->style);
 }
@@ -1118,6 +1128,8 @@ options_from_string(struct options *oo, const struct options_table_entry *oe,
 			xasprintf(cause, "bad option name");
 			return (-1);
 		}
+		if (value == NULL)
+			value = "";
 		type = OPTIONS_TABLE_STRING;
 	}
 
@@ -1252,6 +1264,44 @@ options_push_changes(const char *name)
 		utf8_update_width_cache();
 	if (strcmp(name, "input-buffer-size") == 0)
 		input_set_buffer_size(options_get_number(global_options, name));
+	if (strcmp(name, "kitty-keys") == 0) {
+		int kkeys = options_get_number(global_options, "kitty-keys");
+		int want;
+		TAILQ_FOREACH(loop, &clients, entry) {
+			if (!(loop->tty.flags & TTY_OPENED))
+				continue;
+			/*
+			 * Determine whether this terminal should have kitty
+			 * mode active under the new setting:
+			 * - "always" (==2): all terminals
+			 * - "on" (==1): only terminals with TTY_HAVEDA_KITTY
+			 * - "off" (==0): no terminals
+			 *
+			 * Then push or pop as needed, avoiding double-pushes
+			 * (e.g., switching between "on" and "always") and
+			 * ensuring stale pushes are cleaned up (e.g., "always"
+			 * to "on" must pop non-kitty terminals).
+			 */
+			want = (kkeys == 2) ||
+			    (kkeys == 1 &&
+			    (loop->tty.flags & TTY_HAVEDA_KITTY));
+			if (want && loop->tty.kitty_state == 0) {
+				if (tty_term_has(loop->tty.term,
+				    TTYC_ENKITK)) {
+					tty_puts(&loop->tty,
+					    tty_term_string(loop->tty.term,
+					    TTYC_ENKITK));
+					tty_puts(&loop->tty, "\033[?u");
+					loop->tty.kitty_state = 1;
+				}
+			} else if (!want && loop->tty.kitty_state > 0) {
+					tty_puts(&loop->tty,
+				    tty_term_string(loop->tty.term,
+				    TTYC_DSKITK));
+				loop->tty.kitty_state = 0;
+			}
+		}
+	}
 	if (strcmp(name, "history-limit") == 0) {
 		RB_FOREACH(s, sessions, &sessions)
 			session_update_history(s);

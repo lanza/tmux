@@ -357,7 +357,7 @@ sixel_parse(const char *buf, size_t len, u_int p2, u_int xpixel, u_int ypixel)
 	return (si);
 
 bad:
-	free(si);
+	sixel_free(si);
 	return (NULL);
 }
 
@@ -403,6 +403,11 @@ sixel_log(struct sixel_image *si)
 void
 sixel_size_in_cells(struct sixel_image *si, u_int *x, u_int *y)
 {
+	if (si->xpixel == 0 || si->ypixel == 0) {
+		*x = 0;
+		*y = 0;
+		return;
+	}
 	if ((si->x % si->xpixel) == 0)
 		*x = (si->x / si->xpixel);
 	else
@@ -441,6 +446,14 @@ sixel_scale(struct sixel_image *si, u_int xpixel, u_int ypixel, u_int ox,
 	if (ypixel == 0)
 		ypixel = si->ypixel;
 
+	if (si->xpixel == 0 || si->ypixel == 0 ||
+	    xpixel == 0 || ypixel == 0)
+		return (NULL);
+	if (ox > UINT_MAX / si->xpixel || sx > UINT_MAX / si->xpixel ||
+	    oy > UINT_MAX / si->ypixel || sy > UINT_MAX / si->ypixel ||
+	    sx > UINT_MAX / xpixel || sy > UINT_MAX / ypixel)
+		return (NULL);
+
 	pox = ox * si->xpixel;
 	poy = oy * si->ypixel;
 	psx = sx * si->xpixel;
@@ -455,12 +468,17 @@ sixel_scale(struct sixel_image *si, u_int xpixel, u_int ypixel, u_int ox,
 	new->p2 = si->p2;
 
 	new->set_ra = si->set_ra;
-	/* subtract offset */
-	new->ra_x = new->ra_x > pox ? new->ra_x - pox : 0;
-	new->ra_y = new->ra_y > poy ? new->ra_y - poy : 0;
+	/*
+	 * Raster attributes offset adjustment: new->ra_x/ra_y are always 0
+	 * after xcalloc, so the subtraction below is dead code. Instead,
+	 * compute from si->ra_x/ra_y directly: clamp to the visible region,
+	 * then subtract the pixel offset.
+	 */
+	new->ra_x = si->ra_x > pox ? si->ra_x - pox : 0;
+	new->ra_y = si->ra_y > poy ? si->ra_y - poy : 0;
 	/* clamp to size */
-	new->ra_x = si->ra_x < psx ? si->ra_x : psx;
-	new->ra_y = si->ra_y < psy ? si->ra_y : psy;
+	new->ra_x = new->ra_x < psx ? new->ra_x : psx;
+	new->ra_y = new->ra_y < psy ? new->ra_y : psy;
 	/* resize */
 	new->ra_x = new->ra_x * xpixel / si->xpixel;
 	new->ra_y = new->ra_y * ypixel / si->ypixel;
@@ -487,8 +505,9 @@ static void
 sixel_print_add(char **buf, size_t *len, size_t *used, const char *s,
     size_t slen)
 {
-	if (*used + slen >= *len + 1) {
-		(*len) *= 2;
+	if (*used + slen >= *len) {
+		while (*used + slen >= *len)
+			(*len) *= 2;
 		*buf = xrealloc(*buf, *len);
 	}
 	memcpy(*buf + *used, s, slen);
@@ -634,11 +653,11 @@ sixel_print(struct sixel_image *si, struct sixel_image *map, size_t *size)
 			chunk->used = chunk->next_x = chunk->count = 0;
 		}
 
-		if (buf[used - 1] == '$')
+		if (used > 0 && buf[used - 1] == '$')
 			used--;
 		sixel_print_add(&buf, &len, &used, "-", 1);
 	}
-	if (buf[used - 1] == '-')
+	if (used > 0 && buf[used - 1] == '-')
 		used--;
 
 	sixel_print_add(&buf, &len, &used, "\033\\", 2);

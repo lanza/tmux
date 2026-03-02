@@ -406,6 +406,8 @@ tty_term_apply(struct tty_term *term, const char *capabilities, int quiet)
 			code = &term->codes[i];
 
 			if (remove) {
+				if (code->type == TTYCODE_STRING)
+					free(code->value.string);
 				code->type = TTYCODE_NONE;
 				continue;
 			}
@@ -448,7 +450,10 @@ tty_term_apply_overrides(struct tty_term *term)
 
 	/* Update capabilities from the option. */
 	o = options_get_only(global_options, "terminal-overrides");
-	a = options_array_first(o);
+	if (o == NULL)
+		a = NULL;
+	else
+		a = options_array_first(o);
 	while (a != NULL) {
 		ov = options_array_item_value(a);
 		s = ov->string;
@@ -552,6 +557,8 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 		namelen = strcspn(caps[i], "=");
 		if (namelen == 0)
 			continue;
+		if (caps[i][namelen] != '=')
+			continue;
 		value = caps[i] + namelen + 1;
 
 		for (j = 0; j < tty_term_ncodes(); j++) {
@@ -589,7 +596,10 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 
 	/* Apply terminal features. */
 	o = options_get_only(global_options, "terminal-features");
-	a = options_array_first(o);
+	if (o == NULL)
+		a = NULL;
+	else
+		a = options_array_first(o);
 	while (a != NULL) {
 		ov = options_array_item_value(a);
 		s = ov->string;
@@ -608,7 +618,7 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 #endif
 	/* Check for COLORTERM. */
 	envent = environ_find(tty->client->environ, "COLORTERM");
-	if (envent != NULL) {
+	if (envent != NULL && envent->value != NULL) {
 		log_debug("%s COLORTERM=%s", tty->client->name, envent->value);
 		if (strcasecmp(envent->value, "truecolor") == 0 ||
 		    strcasecmp(envent->value, "24bit") == 0)

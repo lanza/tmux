@@ -91,7 +91,7 @@ cmd_send_keys_inject_key(struct cmdq_item *item, struct cmdq_item *after,
 	}
 	table = key_bindings_get_table(wme->mode->key_table(wme), 1);
 
-	bd = key_bindings_get(table, key & ~KEYC_MASK_FLAGS);
+	bd = key_bindings_get(table, key & ~(KEYC_MASK_FLAGS|KEYC_CAPS_LOCK));
 	if (bd != NULL) {
 		table->references++;
 		after = key_bindings_dispatch(bd, after, tc, NULL, target);
@@ -141,6 +141,13 @@ cmd_send_keys_inject_string(struct cmdq_item *item, struct cmdq_item *after,
 					continue;
 				key = uc;
 			}
+			/*
+			 * When -l was explicitly given, mark as literal so
+			 * bytes bypass kitty encoding.  This is how iTerm2's
+			 * gateway sends literal characters (send -lt %N ...).
+			 */
+			if (args_has(args, 'l'))
+				key |= KEYC_LITERAL;
 			after = cmd_send_keys_inject_key(item, after, args,
 			    key);
 		}

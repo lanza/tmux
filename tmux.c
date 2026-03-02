@@ -127,7 +127,7 @@ expand_path(const char *path, const char *home)
 			name = xstrndup(path + 1, end - path - 1);
 		value = environ_find(global_environ, name);
 		free(name);
-		if (value == NULL)
+		if (value == NULL || value->value == NULL)
 			return (NULL);
 		if (end == NULL)
 			end = "";
@@ -284,7 +284,7 @@ get_timer(void)
 const char *
 sig2name(int signo)
 {
-     static char	s[11];
+     static char	s[12];
 
 #ifdef HAVE_SYS_SIGNAME
      if (signo > 0 && signo < NSIG)
