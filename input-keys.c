@@ -448,7 +448,6 @@ get_modifier(key_code key)
 	modifier++;
 	return modifier;
 }
->>>>>>> 78b1b70d (Improve kitty keyboard protocol support)
 
 
 /* 0:succ,-1 fail */
